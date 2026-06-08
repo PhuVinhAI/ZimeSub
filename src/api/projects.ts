@@ -23,6 +23,16 @@ export interface EpisodeRecord {
   source_mkv_path: string
   folder_name: string
   selected_subtitle_track_id: number | null
+  /**
+   * Denormalised display cache for the picked track's language tag
+   * (3-letter ISO 639-2, e.g. `eng`, `jpn`, `und`). The track id in
+   * `selected_subtitle_track_id` remains the source of truth for the
+   * extract pipeline; this field exists so the Episode row can render
+   * `ENG`/`JPN`/`UND` without re-running `mkvmerge -i` on every load.
+   * Backend sets this atomically alongside the track id whenever the
+   * user confirms a pick in the track-picker modal (slice 0006).
+   */
+  selected_subtitle_language: string | null
   render_config_override: RenderConfig | null
 }
 

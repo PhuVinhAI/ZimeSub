@@ -10,13 +10,16 @@
 //!
 //! The frontend mirrors the names and shapes here in `src/api/`.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
+use serde::Serialize;
 use tauri::{AppHandle, State};
 use tracing::error;
 
 use crate::install::{self, InstallRegistry};
+use crate::mkv_probe::{self, SubtitleTrack};
+use crate::process_runner::{self, RunSpec};
 use crate::project_store::{
     self, AddEpisodesOutcome, FolderInspection, ProjectJson, RecentProjectStatus,
 };
@@ -223,6 +226,135 @@ pub fn project_remove_recent(state: State<'_, AppState>, folder: String) -> Resu
         return Err(err.to_string());
     }
     Ok(())
+}
+
+/// Outcome of [`episode_list_subtitle_tracks`].
+///
+/// `ok` is `true` when `mkvmerge` exited 0 *and* the stdout parsed
+/// cleanly — the modal renders the table from `tracks` + `preselected_index`.
+/// `ok = false` carries the captured `stderr` so the modal can render
+/// it verbatim in a Geist Mono pane next to a "Thử lại" button (AC).
+///
+/// `preselected_index` is the heuristic-suggested row to highlight on
+/// open (PRD rules 1 → 2 → 3 in slice 0006 AC); `None` means no
+/// selectable row exists and the modal must surface the "Không có
+/// subtitle track text-based trong file này" empty-state copy instead.
+#[derive(Debug, Serialize)]
+pub struct ListSubtitleTracksOutcome {
+    pub ok: bool,
+    pub tracks: Vec<SubtitleTrack>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub preselected_index: Option<u32>,
+    pub stderr: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
+}
+
+/// Run `mkvmerge -i -F json <source_mkv_path>` for `episode_id` inside
+/// the project at `folder`, parse the captured stdout into typed
+/// [`SubtitleTrack`]s, and apply the slice 0006 pre-selection heuristic.
+///
+/// Spawn convention:
+///  * `cwd` = EpisodeFolder, per PRD § "Process spawn rules". The
+///    mkvmerge probe itself doesn't care about cwd, but routing all
+///    subprocess calls through the same convention means the
+///    eventual streaming extract job in slice 0007 picks up the same
+///    log lines without changing how it's invoked.
+///  * `executable` = `settings.tool_paths["mkvmerge"]`. If the cache
+///    is empty (e.g. user wiped settings.json after Onboarding) the
+///    command rejects with "Chưa phát hiện đường dẫn mkvmerge".
+///
+/// Failure modes:
+///  * Spawn failure (binary missing, file lock, etc.) → `Err(String)`
+///    surfaced verbatim by the frontend as a danger toast.
+///  * Non-zero exit code → `Ok(ListSubtitleTracksOutcome { ok: false,
+///    stderr, … })` so the modal renders the stderr pane + "Thử lại"
+///    button per AC.
+///  * Parser failure on otherwise-zero exit → same as non-zero exit
+///    above, with the parser error prefixed onto `stderr` so the user
+///    sees both the OS-level output and the parse hint.
+#[tauri::command]
+pub fn episode_list_subtitle_tracks(
+    state: State<'_, AppState>,
+    folder: String,
+    episode_id: String,
+) -> Result<ListSubtitleTracksOutcome, String> {
+    let project_folder = Path::new(&folder);
+    let targets = project_store::resolve_episode_targets(project_folder, &episode_id)
+        .map_err(|e| e.to_string())?;
+
+    let mkvmerge_path = {
+        let settings = state
+            .settings
+            .lock()
+            .map_err(|e| format!("settings mutex poisoned: {e}"))?;
+        settings
+            .tool_paths
+            .get("mkvmerge")
+            .cloned()
+            .ok_or_else(|| "Chưa phát hiện đường dẫn mkvmerge".to_string())?
+    };
+
+    let run_outcome = process_runner::run_to_completion(RunSpec {
+        executable: PathBuf::from(&mkvmerge_path),
+        args: vec![
+            "-i".into(),
+            "-F".into(),
+            "json".into(),
+            targets.source_mkv_path.to_string_lossy().into_owned(),
+        ],
+        cwd: &targets.episode_folder,
+    })
+    .map_err(|e| e.to_string())?;
+
+    if !run_outcome.success() {
+        return Ok(ListSubtitleTracksOutcome {
+            ok: false,
+            tracks: Vec::new(),
+            preselected_index: None,
+            stderr: run_outcome.stderr,
+            exit_code: run_outcome.exit_code,
+        });
+    }
+
+    match mkv_probe::parse_mkvmerge_json(&run_outcome.stdout) {
+        Ok(tracks) => {
+            let preselected_index = mkv_probe::preselect_index(&tracks).map(|i| i as u32);
+            Ok(ListSubtitleTracksOutcome {
+                ok: true,
+                tracks,
+                preselected_index,
+                stderr: run_outcome.stderr,
+                exit_code: run_outcome.exit_code,
+            })
+        }
+        Err(err) => Ok(ListSubtitleTracksOutcome {
+            ok: false,
+            tracks: Vec::new(),
+            preselected_index: None,
+            stderr: format!("{err}\n{}", run_outcome.stderr),
+            exit_code: run_outcome.exit_code,
+        }),
+    }
+}
+
+/// Persist `track_id` (and the denormalised `language` display cache)
+/// as the user's pick for `episode_id` in the project at `folder`.
+/// Returns the post-write [`ProjectJson`] so the frontend can update
+/// `active` without a second `project_open` round-trip.
+///
+/// `language` carries the 3-letter ISO 639-2 code (`eng`, `jpn`,
+/// `und`) for the Episode row's language tag. The track id remains
+/// the source of truth for the extract pipeline.
+#[tauri::command]
+pub fn project_set_selected_track(
+    folder: String,
+    episode_id: String,
+    track_id: u32,
+    language: Option<String>,
+) -> Result<ProjectJson, String> {
+    project_store::set_selected_track(Path::new(&folder), &episode_id, track_id, language)
+        .map_err(|e| e.to_string())
 }
 
 /// Move `folder` to the head of `recent_projects` with a fresh

@@ -1,7 +1,9 @@
 mod commands;
 mod install;
 mod logging;
+mod mkv_probe;
 mod paths;
+mod process_runner;
 mod project_store;
 mod settings_store;
 mod tooling;
@@ -44,6 +46,8 @@ pub fn run() {
             commands::project_list_recents,
             commands::project_remove_recent,
             commands::project_add_episodes,
+            commands::episode_list_subtitle_tracks,
+            commands::project_set_selected_track,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

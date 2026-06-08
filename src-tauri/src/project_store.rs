@@ -18,6 +18,19 @@
 //!    accepted entry, deduplicates against existing `source_mkv_path` entries
 //!    (case-insensitive — Windows-only target), and reports duplicates back
 //!    to the caller so the UI can surface a yellow toast.
+//!
+//! Slice 0006 adds:
+//!  * [`EpisodeRecord::selected_subtitle_language`] — denormalised display
+//!    cache for the picked track's language tag, so the Episode row can
+//!    render `ENG`/`JPN`/`UND` without re-running mkvmerge on every load.
+//!    The track id is still the source of truth for extraction.
+//!  * [`resolve_episode_targets`] — translate `(project_folder, episode_id)`
+//!    into the absolute `source_mkv_path` + `EpisodeFolder` pair the
+//!    track-picker command feeds into `process_runner::run_to_completion`.
+//!  * [`set_selected_track`] — atomic write of the user's pick back to
+//!    `zimesub.json`. Returns the post-write `ProjectJson` so the
+//!    frontend can swap `active` without a second `project_open`
+//!    round-trip.
 
 use std::fs;
 use std::io;
@@ -82,6 +95,15 @@ pub struct EpisodeRecord {
     pub folder_name: String,
     #[serde(default)]
     pub selected_subtitle_track_id: Option<u32>,
+    /// Denormalised display cache for the picked track's language tag
+    /// (3-letter ISO 639-2, e.g. `eng`, `jpn`, `und`). The track id in
+    /// `selected_subtitle_track_id` remains the source of truth for the
+    /// extract pipeline; this field exists so the Episode row can
+    /// render `ENG`/`JPN`/`UND` without re-running `mkvmerge -i` on
+    /// every project open. `#[serde(default)]` so manifests written by
+    /// pre-slice-0006 builds load without the field.
+    #[serde(default)]
+    pub selected_subtitle_language: Option<String>,
     #[serde(default)]
     pub render_config_override: Option<RenderConfig>,
 }
@@ -146,6 +168,12 @@ pub enum ProjectError {
     NameEmpty,
     FolderHasOtherFiles,
     NotAProject,
+    /// Per-episode lookup failed inside an otherwise-valid project.
+    /// Distinct from `NotAProject` so the track-picker command can
+    /// surface a different Vietnamese message ("Không tìm thấy
+    /// Episode") to the modal — the AC's retry button only makes sense
+    /// when the project itself loads cleanly.
+    EpisodeNotFound,
 }
 
 impl std::fmt::Display for ProjectError {
@@ -156,6 +184,7 @@ impl std::fmt::Display for ProjectError {
             ProjectError::NameEmpty => f.write_str("Tên project không được để trống"),
             ProjectError::FolderHasOtherFiles => f.write_str("Thư mục đã có file khác"),
             ProjectError::NotAProject => f.write_str("Thư mục chưa có zimesub.json"),
+            ProjectError::EpisodeNotFound => f.write_str("Không tìm thấy Episode trong project"),
         }
     }
 }
@@ -421,6 +450,7 @@ pub fn add_episodes(
             source_mkv_path: trimmed.to_string(),
             folder_name,
             selected_subtitle_track_id: None,
+            selected_subtitle_language: None,
             render_config_override: None,
         });
         existing_lower.insert(lower);
@@ -436,6 +466,84 @@ pub fn add_episodes(
         added_count,
         duplicates,
     })
+}
+
+/// Concrete on-disk targets for one episode, derived from the
+/// `(project_folder, episode_id)` pair the track-picker command
+/// receives across the IPC boundary.
+///
+/// `source_mkv_path` is the absolute reference the user dropped into
+/// the project (path-only per ADR-0001 — never copied or moved).
+/// `episode_folder` is `<project_folder>/<folder_name>`, used as the
+/// `cwd` for the mkvmerge subprocess per PRD § "Process spawn rules".
+#[derive(Clone, Debug)]
+pub struct EpisodeTargets {
+    pub source_mkv_path: PathBuf,
+    pub episode_folder: PathBuf,
+}
+
+/// Look up `episode_id` inside the project at `project_folder` and
+/// return the absolute `SourceMkv` + `EpisodeFolder` pair the
+/// track-picker command feeds into `process_runner::run_to_completion`.
+///
+/// Read-only — the manifest is not mutated. `ProjectError::NotAProject`
+/// when the folder is no longer a project (e.g. user deleted
+/// zimesub.json behind ZimeSub's back); `ProjectError::EpisodeNotFound`
+/// when the project loads but the requested id is gone (e.g. the user
+/// removed the Episode from a second window).
+pub fn resolve_episode_targets(
+    project_folder: &Path,
+    episode_id: &str,
+) -> Result<EpisodeTargets, ProjectError> {
+    let project = open_project(project_folder)?;
+    let episode = project
+        .episodes
+        .iter()
+        .find(|e| e.id == episode_id)
+        .ok_or(ProjectError::EpisodeNotFound)?;
+    Ok(EpisodeTargets {
+        source_mkv_path: PathBuf::from(&episode.source_mkv_path),
+        episode_folder: project_folder.join(&episode.folder_name),
+    })
+}
+
+/// Update `selected_subtitle_track_id` (and the denormalised
+/// `selected_subtitle_language` display cache) for `episode_id` inside
+/// the project at `folder`. The manifest is rewritten atomically
+/// (`tmp + rename`) regardless of whether the values actually changed —
+/// the AC's "Modal closes; the Episode row reflects the selection"
+/// requirement is satisfied by returning the post-write `ProjectJson`
+/// so the frontend swaps `active` without a second `project_open`
+/// round-trip.
+///
+/// `language` is the 3-letter ISO 639-2 code (e.g. `eng`, `jpn`) or
+/// `"und"`. Passing `None` clears the cache — kept as a possibility
+/// for a future "Bỏ chọn track" affordance even though slice 0006
+/// only sets it.
+///
+/// Errors:
+///  * `ProjectError::NotAProject` — `folder/zimesub.json` missing.
+///  * `ProjectError::EpisodeNotFound` — id not in `episodes`.
+///  * `ProjectError::Io` — read/write/rename failed.
+///  * `ProjectError::Parse` — manifest is corrupt JSON.
+pub fn set_selected_track(
+    folder: &Path,
+    episode_id: &str,
+    track_id: u32,
+    language: Option<String>,
+) -> Result<ProjectJson, ProjectError> {
+    let mut project = open_project(folder)?;
+    {
+        let episode = project
+            .episodes
+            .iter_mut()
+            .find(|e| e.id == episode_id)
+            .ok_or(ProjectError::EpisodeNotFound)?;
+        episode.selected_subtitle_track_id = Some(track_id);
+        episode.selected_subtitle_language = language;
+    }
+    write_project_json_atomic(folder, &project)?;
+    Ok(project)
 }
 
 fn read_project_json(path: &Path) -> Result<ProjectJson, ProjectError> {
@@ -665,6 +773,7 @@ mod tests {
         for ep in &on_disk.episodes {
             assert!(!ep.id.is_empty(), "episode id must be uuid v4");
             assert!(ep.selected_subtitle_track_id.is_none());
+            assert!(ep.selected_subtitle_language.is_none());
             assert!(ep.render_config_override.is_none());
             assert!(dir.join(&ep.folder_name).is_dir(), "EpisodeFolder must exist");
         }
@@ -779,6 +888,125 @@ mod tests {
         assert!(!ep.folder_name.contains([':', '<', '>', '|', '"']));
         assert!(dir.join(&ep.folder_name).is_dir());
 
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn set_selected_track_persists_id_and_language() {
+        let dir = temp_dir_for_test("set-selected-track-happy");
+        create_project(&dir, "TrackTest").expect("create");
+        let inputs = vec!["C:\\Anime\\Show - 01.mkv".to_string()];
+        let outcome = add_episodes(&dir, &inputs).expect("add");
+        let ep_id = outcome.project.episodes[0].id.clone();
+
+        let updated = set_selected_track(&dir, &ep_id, 2, Some("eng".into())).expect("set");
+        assert_eq!(updated.episodes[0].selected_subtitle_track_id, Some(2));
+        assert_eq!(updated.episodes[0].selected_subtitle_language.as_deref(), Some("eng"));
+
+        // Round-trip — the manifest on disk must reflect the new fields.
+        let on_disk = open_project(&dir).expect("re-open");
+        assert_eq!(on_disk.episodes[0].selected_subtitle_track_id, Some(2));
+        assert_eq!(on_disk.episodes[0].selected_subtitle_language.as_deref(), Some("eng"));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn set_selected_track_overwrites_previous_pick() {
+        let dir = temp_dir_for_test("set-selected-track-overwrite");
+        create_project(&dir, "OverwriteTest").expect("create");
+        let inputs = vec!["C:\\Anime\\Show - 02.mkv".to_string()];
+        let outcome = add_episodes(&dir, &inputs).expect("add");
+        let ep_id = outcome.project.episodes[0].id.clone();
+
+        set_selected_track(&dir, &ep_id, 2, Some("eng".into())).expect("first set");
+        let updated = set_selected_track(&dir, &ep_id, 3, Some("jpn".into())).expect("second set");
+        assert_eq!(updated.episodes[0].selected_subtitle_track_id, Some(3));
+        assert_eq!(updated.episodes[0].selected_subtitle_language.as_deref(), Some("jpn"));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn set_selected_track_errors_when_episode_missing() {
+        let dir = temp_dir_for_test("set-selected-track-missing-ep");
+        create_project(&dir, "MissingEpTest").expect("create");
+        let err = set_selected_track(&dir, "no-such-episode-id", 2, None).unwrap_err();
+        assert!(matches!(err, ProjectError::EpisodeNotFound));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn set_selected_track_errors_when_project_missing() {
+        let dir = temp_dir_for_test("set-selected-track-no-project");
+        let err = set_selected_track(&dir, "any-id", 2, None).unwrap_err();
+        assert!(matches!(err, ProjectError::NotAProject));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn resolve_episode_targets_returns_source_and_folder_paths() {
+        let dir = temp_dir_for_test("resolve-targets-happy");
+        create_project(&dir, "ResolveTest").expect("create");
+        let inputs = vec!["C:\\Anime\\Show - 03.mkv".to_string()];
+        let outcome = add_episodes(&dir, &inputs).expect("add");
+        let ep_id = outcome.project.episodes[0].id.clone();
+
+        let targets = resolve_episode_targets(&dir, &ep_id).expect("resolve");
+        assert_eq!(
+            targets.source_mkv_path.to_string_lossy(),
+            "C:\\Anime\\Show - 03.mkv"
+        );
+        assert_eq!(targets.episode_folder, dir.join("Show - 03"));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn resolve_episode_targets_errors_for_missing_episode() {
+        let dir = temp_dir_for_test("resolve-targets-missing");
+        create_project(&dir, "ResolveMissing").expect("create");
+        let err = resolve_episode_targets(&dir, "no-such-id").unwrap_err();
+        assert!(matches!(err, ProjectError::EpisodeNotFound));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn legacy_manifest_without_selected_subtitle_language_loads_cleanly() {
+        // Manifest written by a pre-slice-0006 build omits the new field.
+        // `#[serde(default)]` must accept the missing key without error.
+        let dir = temp_dir_for_test("legacy-manifest");
+        fs::create_dir_all(&dir).expect("mkdir");
+        let manifest = dir.join(PROJECT_FILE_NAME);
+        let body = r#"{
+          "version": 1,
+          "name": "Legacy",
+          "created_at": "2026-06-01T00:00:00+07:00",
+          "default_render_config": {
+            "encoder": "auto",
+            "quality": 65,
+            "audio_codec": "aac",
+            "audio_bitrate_kbps": 192
+          },
+          "default_extract_audio": {
+            "codec": "libmp3lame",
+            "quality_or_bitrate": "q:a 2"
+          },
+          "episodes": [
+            {
+              "id": "ep-1",
+              "source_mkv_path": "C:\\old\\X.mkv",
+              "folder_name": "X",
+              "selected_subtitle_track_id": 2,
+              "render_config_override": null
+            }
+          ]
+        }"#;
+        fs::write(&manifest, body).expect("write legacy");
+        let project = open_project(&dir).expect("load legacy");
+        assert_eq!(project.episodes.len(), 1);
+        assert_eq!(project.episodes[0].selected_subtitle_track_id, Some(2));
+        assert!(project.episodes[0].selected_subtitle_language.is_none());
         let _ = fs::remove_dir_all(&dir);
     }
 }

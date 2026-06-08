@@ -1,6 +1,6 @@
 import { useModal } from '@lib/modal/modalStack'
 import { X } from 'lucide-solid'
-import { type Component, type JSX, type ParentProps, Show } from 'solid-js'
+import { Show, type Component, type JSX, type ParentProps } from 'solid-js'
 
 /**
  * Minimal centered modal primitive.
@@ -20,6 +20,13 @@ interface ModalProps {
   title?: string
   ariaLabel: string
   footer?: JSX.Element
+  /**
+   * Tailwind max-width utility for the modal card. Defaults to
+   * `max-w-xl`. Slice 0006's track-picker bumps this to `max-w-3xl`
+   * to fit the columns (track id / language / codec / title / flags)
+   * without sideways scrolling on the 1024 px minimum window width.
+   */
+  maxWidthClass?: string
 }
 
 const Modal: Component<ParentProps<ModalProps>> = props => {
@@ -30,6 +37,7 @@ const Modal: Component<ParentProps<ModalProps>> = props => {
         title={props.title}
         ariaLabel={props.ariaLabel}
         footer={props.footer}
+        maxWidthClass={props.maxWidthClass}
       >
         {props.children}
       </ModalInner>
@@ -53,7 +61,10 @@ const ModalInner: Component<ParentProps<Omit<ModalProps, 'open'>>> = props => {
       role="presentation"
     >
       <section
-        class="flex max-h-full w-full max-w-xl flex-col border-2 border-border bg-surface"
+        class={[
+          'flex max-h-full w-full flex-col border-2 border-border bg-surface',
+          props.maxWidthClass ?? 'max-w-xl'
+        ].join(' ')}
         role="dialog"
         aria-modal="true"
         aria-label={props.ariaLabel}

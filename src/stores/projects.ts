@@ -1,3 +1,4 @@
+import { projectSetSelectedTrack } from '@api/mkv_probe'
 import {
   projectAddEpisodes,
   projectCreate,
@@ -231,6 +232,32 @@ export async function addEpisodes(paths: string[]): Promise<AddEpisodesOutcome |
   } catch (err) {
     pushDangerToast(`Không thêm được Episode: ${messageOf(err)}`)
     return null
+  }
+}
+
+/**
+ * Persist the user's track pick for `episodeId` from the track-picker
+ * modal (slice 0006). Updates `state.active` from the backend's
+ * post-write `ProjectJson` so the Episode row re-renders with the
+ * language tag in the same tick the modal closes.
+ *
+ * Throws on backend failure so the caller (modal) can keep the modal
+ * open and re-render the previous phase — failure also flips a danger
+ * toast so the user has ambient feedback even after they dismiss.
+ */
+export async function setEpisodeSelectedTrack(
+  episodeId: string,
+  trackId: number,
+  language: string | null
+): Promise<void> {
+  const folder = state.activeFolder
+  if (!folder) return
+  try {
+    const project = await projectSetSelectedTrack(folder, episodeId, trackId, language)
+    setState({ active: project })
+  } catch (err) {
+    pushDangerToast(`Không lưu được track: ${messageOf(err)}`)
+    throw err instanceof Error ? err : new Error(messageOf(err))
   }
 }
 

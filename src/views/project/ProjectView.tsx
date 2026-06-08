@@ -3,6 +3,7 @@ import type { EpisodeRecord, ProjectJson } from '@api/projects'
 import Button from '@design-system/Button'
 import StatusBadge from '@design-system/StatusBadge'
 import { addEpisodes } from '@stores/projects'
+import TrackPickerModal from '@views/track-picker/TrackPickerModal'
 import { FilePlus2, Plus } from 'lucide-solid'
 import { createSignal, For, Show, type Component } from 'solid-js'
 
@@ -15,18 +16,23 @@ interface ProjectViewProps {
  * Main view when a project is open.
  *
  * Slice 0004 rendered the project header + an empty-state placeholder.
- * Slice 0005 wires:
- *   * "Thêm Episode…" button — opens the multi-file MKV picker as the
- *     keyboard-only alternative to drag-drop.
- *   * Episode list rows — folder name (with full source path on hover),
- *     `source_mkv_path` in mono, "Trống" badge until the pipeline
- *     produces artefacts (slices 0006+ derive richer EpisodeState).
+ * Slice 0005 wired drag-drop, the multi-file picker, and the
+ * `EPISODES · N` list with "Trống" badges.
+ * Slice 0006 adds the per-Episode track-picker affordance:
+ *   * "Chọn track" button on rows without `selected_subtitle_track_id`.
+ *   * "Đổi track" link replaces the button once a track has been picked
+ *     — opens the same modal pre-selected to the existing pick (when
+ *     still extractable in the freshly-re-probed list).
+ *   * Language tag (`ENG`/`JPN`/`UND`) renders next to the state badge
+ *     on rows that have a selection, so the user sees their pick at a
+ *     glance without opening the modal again.
  *
  * The drag-drop overlay itself is hosted by `AppShell` so it covers the
  * whole window (Sidebar + StatusBar included), per the AC.
  */
 const ProjectView: Component<ProjectViewProps> = props => {
   const [picking, setPicking] = createSignal(false)
+  const [pickerEpisode, setPickerEpisode] = createSignal<EpisodeRecord | null>(null)
 
   const handlePickFiles = async (): Promise<void> => {
     if (picking()) return
@@ -75,12 +81,22 @@ const ProjectView: Component<ProjectViewProps> = props => {
                 <EpisodeRow
                   episode={episode}
                   isLast={index() === props.project.episodes.length - 1}
+                  onPickTrack={() => setPickerEpisode(episode)}
                 />
               )}
             </For>
           </ul>
         </Show>
       </div>
+
+      <TrackPickerModal
+        open={pickerEpisode() !== null}
+        onClose={() => setPickerEpisode(null)}
+        folder={props.folder}
+        episodeId={pickerEpisode()?.id ?? ''}
+        episodeName={pickerEpisode()?.folder_name ?? ''}
+        initialTrackId={pickerEpisode()?.selected_subtitle_track_id ?? null}
+      />
     </section>
   )
 }
@@ -88,17 +104,24 @@ const ProjectView: Component<ProjectViewProps> = props => {
 interface EpisodeRowProps {
   episode: EpisodeRecord
   isLast: boolean
+  onPickTrack: () => void
 }
 
 /**
  * One row in the Episode list.
  *
  * Layout: folder name (truncated, full path on title hover) + source
- * MKV path in mono + "Trống" badge. Slices 0006+ swap the badge for a
- * derived `EpisodeState` (Empty | Extracting | Extracted | Translating
- * | Translated | Rendering | Rendered, with MissingSource overlay).
+ * MKV path in mono on the left; on the right a stack of the selected
+ * language tag (slice 0006), the state badge ("Trống" until extracted
+ * artefacts exist — derivation lands in slice 0007+), and the track-
+ * pick affordance ("Chọn track" primary button when none picked, "Đổi
+ * track" text link when one is).
  */
 const EpisodeRow: Component<EpisodeRowProps> = props => {
+  const hasSelection = (): boolean => props.episode.selected_subtitle_track_id !== null
+  const languageTag = (): string =>
+    (props.episode.selected_subtitle_language ?? 'und').toUpperCase()
+
   return (
     <li
       class={[
@@ -120,7 +143,33 @@ const EpisodeRow: Component<EpisodeRowProps> = props => {
           {props.episode.source_mkv_path}
         </span>
       </div>
-      <StatusBadge tone="accent">Trống</StatusBadge>
+      <div class="flex flex-none items-center gap-3">
+        <Show when={hasSelection()}>
+          <StatusBadge tone="neutral">{languageTag()}</StatusBadge>
+        </Show>
+        <StatusBadge tone="accent">Trống</StatusBadge>
+        <Show
+          when={hasSelection()}
+          fallback={
+            <Button
+              variant="secondary"
+              onClick={() => props.onPickTrack()}
+              aria-label="Chọn subtitle track cho Episode này"
+            >
+              <span>Chọn track</span>
+            </Button>
+          }
+        >
+          <button
+            type="button"
+            onClick={() => props.onPickTrack()}
+            class="text-sm font-medium text-accent underline-offset-4 transition-colors hover:text-text hover:underline"
+            aria-label="Đổi subtitle track cho Episode này"
+          >
+            Đổi track
+          </button>
+        </Show>
+      </div>
     </li>
   )
 }
