@@ -12,7 +12,11 @@
     "isolatedModules": true,
     "paths": {
       "@components/*": ["./src/components/*"],
-      "@lib/*": ["./src/lib/*"]
+      "@design-system/*": ["./src/design-system/*"],
+      "@lib/*": ["./src/lib/*"],
+      "@api/*": ["./src/api/*"],
+      "@stores/*": ["./src/stores/*"],
+      "@views/*": ["./src/views/*"]
     }
   },
   "include": ["src"],

@@ -1,8 +1,25 @@
+mod commands;
+mod logging;
+mod paths;
+mod settings_store;
+mod tooling;
+
+use tracing::{info, warn};
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    if let Err(err) = logging::init() {
+        // The log file itself failed to come up — fall back to stderr so the
+        // user (or a dev tail-ing the console) still sees the startup error.
+        eprintln!("ZimeSub: failed to initialise log file: {err}");
+    }
+    info!("ZimeSub starting (v{})", env!("CARGO_PKG_VERSION"));
+    if paths::app_data_dir().is_none() {
+        warn!("Roaming AppData directory not available; settings + logs will not persist");
+    }
+
     let mut builder = tauri::Builder::default();
 
-    // Enable the Tauri devtools plugin in development builds
     #[cfg(debug_assertions)]
     {
         let devtools = tauri_plugin_devtools::init();
@@ -10,9 +27,11 @@ pub fn run() {
     }
 
     builder
-        // .plugin( /* Add your Tauri plugin here */ )
-        // Add your commands here that you will call from your JS code
-        // .invoke_handler(tauri::generate_handler![ /* Add your commands here */ ])
+        .manage(commands::AppState::new())
+        .invoke_handler(tauri::generate_handler![
+            commands::tool_probe,
+            commands::tool_rescan,
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
