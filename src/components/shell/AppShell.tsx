@@ -5,6 +5,7 @@ import StatusBar from '@components/shell/StatusBar'
 import ToastStack from '@design-system/ToastStack'
 import { installGlobalShortcuts } from '@lib/keyboard/globalShortcuts'
 import { useKeyboardShortcut } from '@lib/keyboard/useKeyboardShortcut'
+import { ensureJobSubscriptions, setActiveProject } from '@stores/jobs'
 import { addEpisodes, bootstrapActiveProject, projectsStore } from '@stores/projects'
 import { allReady, bootstrapTools, toolsStore } from '@stores/tools'
 import { getCurrentWebview } from '@tauri-apps/api/webview'
@@ -55,6 +56,11 @@ const AppShell: Component = () => {
     const dispose = installGlobalShortcuts()
     onCleanup(dispose)
     void bootstrapTools()
+    // Bind backend job-event listeners once per app instance. Idempotent
+    // — safe across Solid dev double-mount and HMR; events fired before
+    // a project opens are scoped per-Episode so they no-op until the
+    // jobs store has an `activeFolder` to attribute them to.
+    void ensureJobSubscriptions()
   })
 
   // Once Onboarding clears, kick off the project bootstrap exactly once.
@@ -67,6 +73,31 @@ const AppShell: Component = () => {
         if (ready) {
           void bootstrapActiveProject()
         }
+      }
+    )
+  )
+
+  // Bridge the projects store to the jobs store whenever the active
+  // project changes: drop the per-Episode state from the previous
+  // project (jobs, artifacts, don't-ask memory) and re-inspect the
+  // disk for every Episode in the new one so each row's badge boots
+  // with the correct "Trống" vs "Đã extract" derivation. Tracked by
+  // (folder, episode count) so re-opening the same project or
+  // appending Episodes both trigger the re-sync.
+  createEffect(
+    on(
+      () => {
+        const project = projectsStore.active
+        const folder = projectsStore.activeFolder
+        if (!project || !folder) return null
+        return {
+          folder,
+          ids: project.episodes.map(e => e.id)
+        }
+      },
+      snapshot => {
+        if (!snapshot) return
+        void setActiveProject(snapshot.folder, snapshot.ids)
       }
     )
   )

@@ -1,10 +1,23 @@
 import { pickMkvFiles } from '@api/dialog'
 import type { EpisodeRecord, ProjectJson } from '@api/projects'
 import Button from '@design-system/Button'
+import ProgressBar from '@design-system/ProgressBar'
 import StatusBadge from '@design-system/StatusBadge'
+import {
+  artifactStateFor,
+  cancelExtractSubtitle,
+  clearJobState,
+  jobStateFor,
+  rememberDontAskOverwrite,
+  shouldConfirmOverwrite,
+  startExtractSubtitle,
+  type EpisodeJobState
+} from '@stores/jobs'
 import { addEpisodes } from '@stores/projects'
+import ExtractConfirmModal from '@views/project/ExtractConfirmModal'
+import ExtractErrorModal from '@views/project/ExtractErrorModal'
 import TrackPickerModal from '@views/track-picker/TrackPickerModal'
-import { FilePlus2, Plus } from 'lucide-solid'
+import { FilePlus2, Loader2, Plus, RotateCw, Scissors } from 'lucide-solid'
 import { createSignal, For, Show, type Component } from 'solid-js'
 
 interface ProjectViewProps {
@@ -18,14 +31,11 @@ interface ProjectViewProps {
  * Slice 0004 rendered the project header + an empty-state placeholder.
  * Slice 0005 wired drag-drop, the multi-file picker, and the
  * `EPISODES · N` list with "Trống" badges.
- * Slice 0006 adds the per-Episode track-picker affordance:
- *   * "Chọn track" button on rows without `selected_subtitle_track_id`.
- *   * "Đổi track" link replaces the button once a track has been picked
- *     — opens the same modal pre-selected to the existing pick (when
- *     still extractable in the freshly-re-probed list).
- *   * Language tag (`ENG`/`JPN`/`UND`) renders next to the state badge
- *     on rows that have a selection, so the user sees their pick at a
- *     glance without opening the modal again.
+ * Slice 0006 added the per-Episode track-picker affordance plus the
+ * language tag on rows with a selection.
+ * Slice 0007 wires the extract pipeline: per-row "Trích xuất sub"
+ * button → background mkvextract job → live progress bar → disk state
+ * derivation → overwrite confirm + failure modals.
  *
  * The drag-drop overlay itself is hosted by `AppShell` so it covers the
  * whole window (Sidebar + StatusBar included), per the AC.
@@ -33,6 +43,10 @@ interface ProjectViewProps {
 const ProjectView: Component<ProjectViewProps> = props => {
   const [picking, setPicking] = createSignal(false)
   const [pickerEpisode, setPickerEpisode] = createSignal<EpisodeRecord | null>(null)
+  /** Drives ExtractConfirmModal — non-null when an overwrite confirm is pending. */
+  const [overwriteEpisode, setOverwriteEpisode] = createSignal<EpisodeRecord | null>(null)
+  /** Drives ExtractErrorModal — non-null when the user clicked the "Lỗi extract" badge. */
+  const [errorEpisode, setErrorEpisode] = createSignal<EpisodeRecord | null>(null)
 
   const handlePickFiles = async (): Promise<void> => {
     if (picking()) return
@@ -44,6 +58,45 @@ const ProjectView: Component<ProjectViewProps> = props => {
     } finally {
       setPicking(false)
     }
+  }
+
+  /**
+   * EpisodeRow's extract-click entry point. Surfaces the overwrite-
+   * confirm modal when `<basename>.eng.ass` already exists on disk
+   * and the user hasn't toggled "Không hỏi lại" this session;
+   * otherwise enqueues directly.
+   */
+  const handleExtractRequest = (episode: EpisodeRecord): void => {
+    if (shouldConfirmOverwrite(episode.id)) {
+      setOverwriteEpisode(episode)
+    } else {
+      void startExtractSubtitle(episode.id)
+    }
+  }
+
+  const handleOverwriteConfirm = (rememberDontAsk: boolean): void => {
+    const episode = overwriteEpisode()
+    if (!episode) return
+    if (rememberDontAsk) {
+      rememberDontAskOverwrite(episode.id)
+    }
+    setOverwriteEpisode(null)
+    void startExtractSubtitle(episode.id)
+  }
+
+  /**
+   * Close the error modal. We also clear the failed `EpisodeJobState`
+   * so the red "Lỗi extract" badge collapses back to the disk-only
+   * appearance — the user has acknowledged the failure and the row
+   * should reflect that (the underlying artefact is still missing, so
+   * the badge will fall back to "Trống" via the artefact cache).
+   */
+  const handleErrorDismiss = (): void => {
+    const episode = errorEpisode()
+    if (episode) {
+      clearJobState(episode.id)
+    }
+    setErrorEpisode(null)
   }
 
   return (
@@ -82,6 +135,9 @@ const ProjectView: Component<ProjectViewProps> = props => {
                   episode={episode}
                   isLast={index() === props.project.episodes.length - 1}
                   onPickTrack={() => setPickerEpisode(episode)}
+                  onExtract={() => handleExtractRequest(episode)}
+                  onCancelExtract={() => void cancelExtractSubtitle(episode.id)}
+                  onShowError={() => setErrorEpisode(episode)}
                 />
               )}
             </For>
@@ -97,6 +153,22 @@ const ProjectView: Component<ProjectViewProps> = props => {
         episodeName={pickerEpisode()?.folder_name ?? ''}
         initialTrackId={pickerEpisode()?.selected_subtitle_track_id ?? null}
       />
+
+      <ExtractConfirmModal
+        open={overwriteEpisode() !== null}
+        episodeName={overwriteEpisode()?.folder_name ?? ''}
+        onConfirm={handleOverwriteConfirm}
+        onCancel={() => setOverwriteEpisode(null)}
+      />
+
+      <ExtractErrorModal
+        open={errorEpisode() !== null}
+        onClose={handleErrorDismiss}
+        episodeName={errorEpisode()?.folder_name ?? ''}
+        stderr={errorEpisode() ? jobStateFor(errorEpisode()!.id).stderr : ''}
+        errorMessage={errorEpisode() ? jobStateFor(errorEpisode()!.id).error : null}
+        exitCode={errorEpisode() ? jobStateFor(errorEpisode()!.id).exitCode : null}
+      />
     </section>
   )
 }
@@ -105,6 +177,9 @@ interface EpisodeRowProps {
   episode: EpisodeRecord
   isLast: boolean
   onPickTrack: () => void
+  onExtract: () => void
+  onCancelExtract: () => void
+  onShowError: () => void
 }
 
 /**
@@ -112,15 +187,28 @@ interface EpisodeRowProps {
  *
  * Layout: folder name (truncated, full path on title hover) + source
  * MKV path in mono on the left; on the right a stack of the selected
- * language tag (slice 0006), the state badge ("Trống" until extracted
- * artefacts exist — derivation lands in slice 0007+), and the track-
- * pick affordance ("Chọn track" primary button when none picked, "Đổi
- * track" text link when one is).
+ * language tag (slice 0006), the derived state badge or progress bar
+ * (slice 0007), the primary action button (Trích xuất sub / Hủy /
+ * Thử lại / Chọn track), and the "Đổi track" link when a track is
+ * already picked.
+ *
+ * Reads the live extract-job phase and the disk-artefact cache
+ * directly from `@stores/jobs` so the row re-renders on each
+ * `job-progress` event without prop-drilling the snapshot.
  */
 const EpisodeRow: Component<EpisodeRowProps> = props => {
   const hasSelection = (): boolean => props.episode.selected_subtitle_track_id !== null
   const languageTag = (): string =>
     (props.episode.selected_subtitle_language ?? 'und').toUpperCase()
+
+  const job = (): EpisodeJobState => jobStateFor(props.episode.id)
+  const hasExtractedSub = (): boolean =>
+    artifactStateFor(props.episode.id)?.hasExtractedSub ?? false
+
+  const isQueued = (): boolean => job().phase === 'queued'
+  const isRunning = (): boolean => job().phase === 'running'
+  const isFailed = (): boolean => job().phase === 'failed'
+  const isInFlight = (): boolean => isQueued() || isRunning()
 
   return (
     <li
@@ -147,19 +235,27 @@ const EpisodeRow: Component<EpisodeRowProps> = props => {
         <Show when={hasSelection()}>
           <StatusBadge tone="neutral">{languageTag()}</StatusBadge>
         </Show>
-        <StatusBadge tone="accent">Trống</StatusBadge>
-        <Show
-          when={hasSelection()}
-          fallback={
-            <Button
-              variant="secondary"
-              onClick={() => props.onPickTrack()}
-              aria-label="Chọn subtitle track cho Episode này"
-            >
-              <span>Chọn track</span>
-            </Button>
-          }
-        >
+
+        <StateSlot
+          isQueued={isQueued()}
+          isRunning={isRunning()}
+          isFailed={isFailed()}
+          hasExtractedSub={hasExtractedSub()}
+          ratio={job().ratio}
+          hint={job().hint}
+          onShowError={props.onShowError}
+        />
+
+        <ActionButton
+          hasSelection={hasSelection()}
+          isInFlight={isInFlight()}
+          isFailed={isFailed()}
+          onPickTrack={props.onPickTrack}
+          onExtract={props.onExtract}
+          onCancelExtract={props.onCancelExtract}
+        />
+
+        <Show when={hasSelection() && !isInFlight()}>
           <button
             type="button"
             onClick={() => props.onPickTrack()}
@@ -173,6 +269,159 @@ const EpisodeRow: Component<EpisodeRowProps> = props => {
     </li>
   )
 }
+
+interface StateSlotProps {
+  isQueued: boolean
+  isRunning: boolean
+  isFailed: boolean
+  hasExtractedSub: boolean
+  ratio: number
+  hint: string
+  onShowError: () => void
+}
+
+/**
+ * The middle slot in the right cluster — renders one of:
+ *  - Progress bar + hint (running)
+ *  - Accent "Đang chờ" badge (queued, pre-`job-started`)
+ *  - Danger "Lỗi extract" clickable badge (failed)
+ *  - Accent "Đã extract" badge (disk has `<basename>.eng.ass`)
+ *  - Accent "Trống" badge (default empty state)
+ *
+ * Kept as a sibling component so the precedence order is explicit and
+ * the `<Switch>` doesn't crowd the row template.
+ */
+const StateSlot: Component<StateSlotProps> = props => (
+  <Show
+    when={props.isRunning}
+    fallback={
+      <Show
+        when={props.isQueued}
+        fallback={
+          <Show
+            when={props.isFailed}
+            fallback={
+              <Show
+                when={props.hasExtractedSub}
+                fallback={<StatusBadge tone="accent">Trống</StatusBadge>}
+              >
+                <StatusBadge tone="accent">Đã extract</StatusBadge>
+              </Show>
+            }
+          >
+            <button
+              type="button"
+              onClick={() => props.onShowError()}
+              class="inline-flex items-center gap-1.5 border-2 border-danger bg-bg px-2.5 py-1 font-mono text-xs font-medium tracking-wide text-danger uppercase transition-colors hover:bg-danger hover:text-accent-on-accent"
+              aria-label="Xem chi tiết lỗi extract"
+            >
+              Lỗi extract
+            </button>
+          </Show>
+        }
+      >
+        <StatusBadge tone="accent">Đang chờ</StatusBadge>
+      </Show>
+    }
+  >
+    <div class="flex w-40 items-center gap-2">
+      <ProgressBar
+        ratio={props.ratio}
+        ariaLabel="Đang trích xuất phụ đề"
+        ariaValueText={props.hint || `${Math.round(props.ratio * 100)}%`}
+      />
+      <span class="w-10 text-right font-mono text-xs text-text-muted">
+        {props.hint || `${Math.round(props.ratio * 100)}%`}
+      </span>
+    </div>
+  </Show>
+)
+
+interface ActionButtonProps {
+  hasSelection: boolean
+  isInFlight: boolean
+  isFailed: boolean
+  onPickTrack: () => void
+  onExtract: () => void
+  onCancelExtract: () => void
+}
+
+/**
+ * Primary action button on the right of each row. State transitions:
+ *  - No track:               "Chọn track" (secondary, opens picker)
+ *  - Track + idle:           "Trích xuất sub" (primary, kicks the job)
+ *  - In-flight (q'd/running): "Hủy" (secondary, cancels)
+ *  - Failed:                 "Thử lại" (primary, re-extracts — overwrite
+ *                            confirm flow same as the idle path)
+ *
+ * The "Trích xuất sub" button is the slice 0007 AC's gated affordance:
+ * it stays mounted even when no track is selected so the disabled
+ * tooltip ("Chọn subtitle track trước Episode này") explains the
+ * gating — the second `Chọn track` button is the way out.
+ */
+const ActionButton: Component<ActionButtonProps> = props => (
+  <Show
+    when={props.hasSelection}
+    fallback={
+      <>
+        <Button
+          variant="primary"
+          onClick={() => props.onExtract()}
+          disabled
+          title="Chọn subtitle track trước"
+          aria-label="Trích xuất subtitle (yêu cầu chọn track trước)"
+        >
+          <Scissors size={18} strokeWidth={1.5} aria-hidden="true" />
+          <span>Trích xuất sub</span>
+        </Button>
+        <Button
+          variant="secondary"
+          onClick={() => props.onPickTrack()}
+          aria-label="Chọn subtitle track cho Episode này"
+        >
+          <span>Chọn track</span>
+        </Button>
+      </>
+    }
+  >
+    <Show
+      when={props.isInFlight}
+      fallback={
+        <Show
+          when={props.isFailed}
+          fallback={
+            <Button
+              variant="primary"
+              onClick={() => props.onExtract()}
+              aria-label="Trích xuất phụ đề cho Episode này"
+            >
+              <Scissors size={18} strokeWidth={1.5} aria-hidden="true" />
+              <span>Trích xuất sub</span>
+            </Button>
+          }
+        >
+          <Button
+            variant="primary"
+            onClick={() => props.onExtract()}
+            aria-label="Thử trích xuất lại"
+          >
+            <RotateCw size={18} strokeWidth={1.5} aria-hidden="true" />
+            <span>Thử lại</span>
+          </Button>
+        </Show>
+      }
+    >
+      <Button
+        variant="secondary"
+        onClick={() => props.onCancelExtract()}
+        aria-label="Hủy job extract đang chạy"
+      >
+        <Loader2 size={18} strokeWidth={1.5} class="animate-spin" aria-hidden="true" />
+        <span>Hủy</span>
+      </Button>
+    </Show>
+  </Show>
+)
 
 /**
  * Empty-state for the Episode list — the AC strings exactly. Slice 0005

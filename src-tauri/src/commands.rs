@@ -11,13 +11,15 @@
 //! The frontend mirrors the names and shapes here in `src/api/`.
 
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use serde::Serialize;
 use tauri::{AppHandle, State};
 use tracing::error;
 
+use crate::episode_state::{self, EpisodeArtifacts};
 use crate::install::{self, InstallRegistry};
+use crate::job_queue::{ExtractSubtitleSpec, JobQueue};
 use crate::mkv_probe::{self, SubtitleTrack};
 use crate::process_runner::{self, RunSpec};
 use crate::project_store::{
@@ -26,12 +28,19 @@ use crate::project_store::{
 use crate::settings_store::{self, Settings};
 use crate::tooling::{self, RequiredTool, ToolReport};
 
-/// State managed by Tauri — owns the in-memory copy of `settings.json` and
-/// the registry of in-flight winget installs. All command handlers route
-/// through this struct.
+/// State managed by Tauri — owns the in-memory copy of `settings.json`,
+/// the registry of in-flight winget installs, and a lazy handle to the
+/// background [`JobQueue`]. All command handlers route through this
+/// struct.
 pub struct AppState {
     settings: Mutex<Settings>,
     installs: Arc<InstallRegistry>,
+    /// Lazy: instantiated on the first job command (extract-subtitle
+    /// start/cancel) because [`JobQueue::new`] needs an `AppHandle`,
+    /// which only Tauri command handlers see. `OnceLock` keeps the
+    /// init thread-safe and avoids spawning the worker task on apps
+    /// that never reach the pipeline (e.g. an Onboarding-only session).
+    jobs: OnceLock<Arc<JobQueue>>,
 }
 
 impl AppState {
@@ -43,7 +52,16 @@ impl AppState {
         Self {
             settings: Mutex::new(settings),
             installs: Arc::new(InstallRegistry::new()),
+            jobs: OnceLock::new(),
         }
+    }
+
+    /// Lazily spawn the [`JobQueue`] worker task on first use, then
+    /// hand back the shared `Arc` handle for subsequent commands.
+    fn jobs(&self, app: &AppHandle) -> Arc<JobQueue> {
+        self.jobs
+            .get_or_init(|| JobQueue::new(app.clone()))
+            .clone()
     }
 }
 
@@ -355,6 +373,150 @@ pub fn project_set_selected_track(
 ) -> Result<ProjectJson, String> {
     project_store::set_selected_track(Path::new(&folder), &episode_id, track_id, language)
         .map_err(|e| e.to_string())
+}
+
+/// Disk-artefact snapshot for one Episode — the disk half of the
+/// PRD's `derive_state` pseudocode. Slice 0007 only flips
+/// `has_extracted_sub`; the other fields are present in the wire
+/// shape from day one so the frontend store doesn't need a follow-up
+/// rewrite when later slices light up the translate / render stages.
+///
+/// `output_basename` echoes back the EpisodeFolder name so the
+/// frontend can render the resolved artefact path (`<basename>.eng.ass`)
+/// in tooltips and the "open in Explorer" affordance later without a
+/// second round-trip through `resolve_episode_targets`.
+#[derive(Debug, Serialize)]
+pub struct EpisodeArtifactsView {
+    pub has_extracted_sub: bool,
+    pub has_translation_draft: bool,
+    pub has_translated_sub: bool,
+    pub has_render: bool,
+    pub output_basename: String,
+}
+
+impl EpisodeArtifactsView {
+    fn from_inspection(inspected: EpisodeArtifacts, output_basename: String) -> Self {
+        Self {
+            has_extracted_sub: inspected.has_extracted_sub,
+            has_translation_draft: inspected.has_translation_draft,
+            has_translated_sub: inspected.has_translated_sub,
+            has_render: inspected.has_render,
+            output_basename,
+        }
+    }
+}
+
+/// Inspect the on-disk artefacts inside `episode_id`'s EpisodeFolder
+/// and return a typed snapshot the frontend overlays with its live
+/// JobsStore phase to pick the row badge.
+///
+/// Called by the frontend on three occasions:
+///  * Project open / project switch — once per Episode, so the row
+///    boots with the correct "Trống" vs "Đã extract" badge instead
+///    of always defaulting to "Trống".
+///  * After a `job-done` event for the Episode — refresh the single
+///    row so the badge flips to "Đã extract" the moment mkvextract
+///    finishes (per the AC's "EpisodeState is recomputed from disk"
+///    requirement).
+///  * On the overwrite-confirm path — to decide whether to surface
+///    the modal at all.
+#[tauri::command]
+pub fn episode_inspect_artifacts(
+    folder: String,
+    episode_id: String,
+) -> Result<EpisodeArtifactsView, String> {
+    let project_folder = Path::new(&folder);
+    let targets = project_store::resolve_episode_targets(project_folder, &episode_id)
+        .map_err(|e| e.to_string())?;
+    let basename = targets
+        .episode_folder
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let inspected = episode_state::inspect_artifacts(&targets.episode_folder, &basename);
+    Ok(EpisodeArtifactsView::from_inspection(inspected, basename))
+}
+
+/// Enqueue a fresh `ExtractSubtitle` job for `episode_id` on the
+/// background queue. Returns as soon as the spec is on the channel —
+/// the worker emits `job-started` / `job-progress` / `job-done`
+/// events the frontend's JobsStore subscribes to.
+///
+/// Pre-conditions enforced here (failure is surfaced as a danger
+/// toast on the frontend rather than a queued job that nobody
+/// finishes):
+///  * The project at `folder` loads and contains `episode_id`.
+///  * `selected_subtitle_track_id` is set on that Episode — without
+///    it, slice 0006's track picker hasn't run yet and the AC
+///    explicitly disables the "Trích xuất sub" button.
+///  * The cached `mkvextract` path in `settings.tool_paths` resolves.
+///    The Onboarding gate guarantees this in normal flow; surfacing
+///    a Vietnamese error string keeps the post-cache-wipe edge case
+///    debuggable.
+///
+/// `job_id` is generated frontend-side (uuid) so log + progress +
+/// done events can be correlated with the originating click — same
+/// pattern the winget install flow uses.
+#[tauri::command]
+pub async fn extract_subtitle_start(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    job_id: String,
+    folder: String,
+    episode_id: String,
+) -> Result<(), String> {
+    let project_folder = Path::new(&folder);
+    let project = project_store::open_project(project_folder).map_err(|e| e.to_string())?;
+    let episode = project
+        .episodes
+        .iter()
+        .find(|e| e.id == episode_id)
+        .ok_or_else(|| "Không tìm thấy Episode trong project".to_string())?;
+    let track_id = episode
+        .selected_subtitle_track_id
+        .ok_or_else(|| "Chưa chọn subtitle track cho Episode này".to_string())?;
+
+    let mkvextract_path = {
+        let settings = state
+            .settings
+            .lock()
+            .map_err(|e| format!("settings mutex poisoned: {e}"))?;
+        settings
+            .tool_paths
+            .get("mkvextract")
+            .cloned()
+            .ok_or_else(|| "Chưa phát hiện đường dẫn mkvextract".to_string())?
+    };
+
+    let episode_folder = project_folder.join(&episode.folder_name);
+    let spec = ExtractSubtitleSpec {
+        job_id,
+        episode_id,
+        mkvextract_path: PathBuf::from(mkvextract_path),
+        source_mkv_path: PathBuf::from(&episode.source_mkv_path),
+        episode_folder,
+        mkv_track_id: track_id,
+        output_basename: episode.folder_name.clone(),
+    };
+
+    let jobs = state.jobs(&app);
+    jobs.enqueue_extract_subtitle(spec).await;
+    Ok(())
+}
+
+/// Cancel a queued or running extract-subtitle job by id. Idempotent:
+/// cancelling an already-cancelled or already-finished job is a no-op
+/// and returns `Ok(())`. The job's cleanup pass takes care of removing
+/// any partial output the cancel interrupted.
+#[tauri::command]
+pub async fn extract_subtitle_cancel(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    job_id: String,
+) -> Result<(), String> {
+    let jobs = state.jobs(&app);
+    let _ = jobs.cancel(&job_id).await;
+    Ok(())
 }
 
 /// Move `folder` to the head of `recent_projects` with a fresh
