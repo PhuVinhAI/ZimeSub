@@ -7,8 +7,10 @@ import { installGlobalShortcuts } from '@lib/keyboard/globalShortcuts'
 import { useKeyboardShortcut } from '@lib/keyboard/useKeyboardShortcut'
 import { ensureJobSubscriptions, setActiveProject } from '@stores/jobs'
 import { addEpisodes, bootstrapActiveProject, projectsStore } from '@stores/projects'
+import { bootstrapSettings } from '@stores/settings'
 import { allReady, bootstrapTools, toolsStore } from '@stores/tools'
 import { getCurrentWebview } from '@tauri-apps/api/webview'
+import JobsPanel from '@views/jobs-panel/JobsPanel'
 import OnboardingView from '@views/onboarding/OnboardingView'
 import CreateProjectModal from '@views/project/CreateProjectModal'
 import ProjectView from '@views/project/ProjectView'
@@ -50,17 +52,23 @@ import {
 const AppShell: Component = () => {
   const [settingsOpen, setSettingsOpen] = createSignal(false)
   const [createProjectOpen, setCreateProjectOpen] = createSignal(false)
+  const [jobsPanelOpen, setJobsPanelOpen] = createSignal(false)
   const [dragOverlayVisible, setDragOverlayVisible] = createSignal(false)
 
   onMount(() => {
     const dispose = installGlobalShortcuts()
     onCleanup(dispose)
     void bootstrapTools()
-    // Bind backend job-event listeners once per app instance. Idempotent
-    // — safe across Solid dev double-mount and HMR; events fired before
-    // a project opens are scoped per-Episode so they no-op until the
-    // jobs store has an `activeFolder` to attribute them to.
+    // Bind backend job-event listeners once per app instance.
+    // Idempotent — safe across Solid dev double-mount and HMR. The
+    // subscription also pulls the initial snapshot so the status
+    // bar mounts with the live queue state rather than the empty
+    // placeholder.
     void ensureJobSubscriptions()
+    // Pull persisted user settings (only `queue_concurrency_extract`
+    // in slice 0008) so the Settings modal opens with the actual
+    // stored value and the JobQueue tier budget reflects it.
+    void bootstrapSettings()
   })
 
   // Once Onboarding clears, kick off the project bootstrap exactly once.
@@ -194,7 +202,12 @@ const AppShell: Component = () => {
               </Show>
             </main>
           </div>
-          <StatusBar onOpenSettings={() => setSettingsOpen(true)} />
+          <StatusBar
+            onOpenSettings={() => setSettingsOpen(true)}
+            onToggleJobsPanel={() => setJobsPanelOpen(prev => !prev)}
+            jobsPanelOpen={jobsPanelOpen()}
+          />
+          <JobsPanel open={jobsPanelOpen()} onClose={() => setJobsPanelOpen(false)} />
           <SettingsModal open={settingsOpen()} onClose={() => setSettingsOpen(false)} />
           <CreateProjectModal
             open={createProjectOpen()}

@@ -1,6 +1,6 @@
+import type { ToolName } from '@api/tooling'
 import { invoke } from '@tauri-apps/api/core'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
-import type { ToolName } from '@api/tooling'
 
 /**
  * TypeScript mirror of `install::EVENT_LOG` payload — one line of winget

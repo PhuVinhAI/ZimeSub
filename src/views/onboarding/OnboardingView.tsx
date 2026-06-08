@@ -60,9 +60,7 @@ const OnboardingView: Component = () => {
           <div>
             <For each={toolsStore.reports}>{report => <ToolRow report={report} />}</For>
             <Show when={toolsStore.reports.length === 0}>
-              <p class="px-6 py-5 text-sm text-text-muted">
-                Chưa có kết quả dò công cụ.
-              </p>
+              <p class="px-6 py-5 text-sm text-text-muted">Chưa có kết quả dò công cụ.</p>
             </Show>
           </div>
         </div>
@@ -74,7 +72,12 @@ const OnboardingView: Component = () => {
           </p>
         </Show>
 
-        <Show when={shouldShowLogPanel(toolsStore.install.phase, toolsStore.install.logs.length)}>
+        <Show
+          when={shouldShowLogPanel(
+            toolsStore.install.phase,
+            toolsStore.install.logs.length
+          )}
+        >
           <InstallLogPanel />
         </Show>
 
@@ -102,9 +105,7 @@ const OnboardingView: Component = () => {
               aria-hidden="true"
               class={toolsStore.phase === 'rescanning' ? 'animate-spin' : ''}
             />
-            <span>
-              {toolsStore.phase === 'rescanning' ? 'Đang quét...' : 'Quét lại'}
-            </span>
+            <span>{toolsStore.phase === 'rescanning' ? 'Đang quét...' : 'Quét lại'}</span>
           </Button>
           <p class="text-xs text-text-muted">
             Sau khi cài hoặc nâng cấp công cụ, nhấn nút này để dò lại — không cần khởi
@@ -128,7 +129,8 @@ function shouldShowLogPanel(phase: InstallPhase, logCount: number): boolean {
 }
 
 const InstallLogPanel: Component = () => {
-  const banner = () => bannerForPhase(toolsStore.install.phase, toolsStore.install.exitCode)
+  const banner = () =>
+    bannerForPhase(toolsStore.install.phase, toolsStore.install.exitCode)
 
   return (
     <section class="flex flex-col gap-3" aria-label="Nhật ký cài đặt">
@@ -179,7 +181,10 @@ interface InstallBanner {
   toneClass: string
 }
 
-function bannerForPhase(phase: InstallPhase, exitCode: number | null): InstallBanner | null {
+function bannerForPhase(
+  phase: InstallPhase,
+  exitCode: number | null
+): InstallBanner | null {
   switch (phase) {
     case 'success':
       return {

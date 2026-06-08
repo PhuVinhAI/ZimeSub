@@ -6,8 +6,10 @@
 //!
 //! Slice 0004 adds `recent_projects` — the move-to-front MRU list that
 //! drives the Sidebar recents and the post-Onboarding auto-open behaviour.
-//! `available_encoders`, `queue_concurrency_*`, and the `ui` block land in
-//! their respective later slices.
+//! Slice 0008 adds `queue_concurrency_extract` — the user-configurable
+//! tier budget for the tiered `JobQueue` (max 1 Render + max N Extract).
+//! `available_encoders` and the `ui` block land in their respective
+//! later slices.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -19,6 +21,11 @@ use serde::{Deserialize, Serialize};
 /// Maximum number of entries kept in `recent_projects`. Anything older than
 /// the 20th most-recent open is dropped from the MRU list.
 pub const RECENT_PROJECTS_CAP: usize = 20;
+
+/// Default tier budget for the `JobQueue`'s extract jobs (slice 0008).
+/// Mirrors `job_queue::DEFAULT_EXTRACT_CONCURRENCY` so the constants
+/// stay in sync without a circular module dep.
+pub const DEFAULT_QUEUE_CONCURRENCY_EXTRACT: u8 = 2;
 
 /// One entry in `recent_projects`. Stored as an object (not just a path
 /// string) so the Sidebar can render "vừa mở" / "X giờ trước" without
@@ -44,6 +51,12 @@ pub struct Settings {
     pub tool_versions: BTreeMap<String, String>,
     #[serde(default)]
     pub recent_projects: Vec<RecentProject>,
+    /// Tier budget for the JobQueue's extract jobs (`ExtractSubtitle`
+    /// + `ExtractAudio`). Defaults to 2; user-configurable in
+    /// Settings (range 1–8, clamped on write). The render tier is
+    /// always 1 per ADR-0003 and is not exposed.
+    #[serde(default = "default_queue_concurrency_extract")]
+    pub queue_concurrency_extract: u8,
 }
 
 impl Default for Settings {
@@ -53,6 +66,7 @@ impl Default for Settings {
             tool_paths: BTreeMap::new(),
             tool_versions: BTreeMap::new(),
             recent_projects: Vec::new(),
+            queue_concurrency_extract: DEFAULT_QUEUE_CONCURRENCY_EXTRACT,
         }
     }
 }
@@ -90,6 +104,10 @@ fn paths_equal_ignoring_case(a: &str, b: &str) -> bool {
 
 fn default_version() -> u32 {
     1
+}
+
+fn default_queue_concurrency_extract() -> u8 {
+    DEFAULT_QUEUE_CONCURRENCY_EXTRACT
 }
 
 /// Errors surfaced to callers. We intentionally keep IO failures and parse
@@ -239,5 +257,30 @@ mod tests {
         let text = r#"{"version":1,"tool_paths":{},"tool_versions":{}}"#;
         let s: Settings = serde_json::from_str(text).expect("deserialize legacy");
         assert!(s.recent_projects.is_empty());
+    }
+
+    #[test]
+    fn settings_default_carries_extract_concurrency_two() {
+        let s = Settings::default();
+        assert_eq!(s.queue_concurrency_extract, 2);
+    }
+
+    #[test]
+    fn settings_load_legacy_supplies_default_extract_concurrency() {
+        // Pre-slice-0008 settings.json had no `queue_concurrency_extract`
+        // field. The forward-compat default keeps existing installs
+        // working without a migration step.
+        let text = r#"{"version":1,"tool_paths":{},"tool_versions":{},"recent_projects":[]}"#;
+        let s: Settings = serde_json::from_str(text).expect("deserialize legacy");
+        assert_eq!(s.queue_concurrency_extract, 2);
+    }
+
+    #[test]
+    fn settings_round_trip_preserves_extract_concurrency() {
+        let mut s = Settings::default();
+        s.queue_concurrency_extract = 5;
+        let text = serde_json::to_string(&s).expect("serialize");
+        let back: Settings = serde_json::from_str(&text).expect("deserialize");
+        assert_eq!(back.queue_concurrency_extract, 5);
     }
 }

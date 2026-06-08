@@ -1,9 +1,4 @@
-import {
-  splitProps,
-  type Component,
-  type JSX,
-  type ParentProps
-} from 'solid-js'
+import { splitProps, type Component, type JSX, type ParentProps } from 'solid-js'
 
 /**
  * Square-ish flat button used across ZimeSub.
@@ -22,9 +17,7 @@ interface OwnProps {
   variant?: Variant
 }
 
-type ButtonProps = ParentProps<
-  OwnProps & JSX.ButtonHTMLAttributes<HTMLButtonElement>
->
+type ButtonProps = ParentProps<OwnProps & JSX.ButtonHTMLAttributes<HTMLButtonElement>>
 
 const variantClasses: Record<Variant, string> = {
   primary:

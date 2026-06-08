@@ -11,8 +11,7 @@ import {
   toolsStore
 } from '@stores/tools'
 import { Download, ExternalLink, RefreshCw, X } from 'lucide-solid'
-import type { Component } from 'solid-js'
-import { Match, Show, Switch } from 'solid-js'
+import { Match, Show, Switch, type Component } from 'solid-js'
 
 /**
  * One row of the Onboarding tool panel.
@@ -86,7 +85,9 @@ const ToolRow: Component<ToolRowProps> = props => {
     <div class="flex flex-col gap-3 border-b-2 border-border px-6 py-5 last:border-b-0">
       <div class="flex items-center justify-between gap-4">
         <div class="flex items-baseline gap-3">
-          <span class="font-mono text-base font-medium text-text">{props.report.name}</span>
+          <span class="font-mono text-base font-medium text-text">
+            {props.report.name}
+          </span>
           <Show when={props.report.detected_version}>
             {v => <span class="font-mono text-xs text-text-muted">v{v()}</span>}
           </Show>
@@ -108,7 +109,9 @@ const ToolRow: Component<ToolRowProps> = props => {
             </Show>
             <p class="text-xs text-warn">
               Phiên bản hiện tại{' '}
-              <span class="font-mono">{props.report.detected_version ?? 'không đọc được'}</span>{' '}
+              <span class="font-mono">
+                {props.report.detected_version ?? 'không đọc được'}
+              </span>{' '}
               — yêu cầu tối thiểu{' '}
               <span class="font-mono">{props.report.minimum_version}</span>.
             </p>

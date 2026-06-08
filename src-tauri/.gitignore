@@ -2,3 +2,5 @@
 # will have compiled files and executables
 /target/
 WixTools
+# Tauri-generated permission schemas + ACL manifests (regenerated on each build)
+/gen/

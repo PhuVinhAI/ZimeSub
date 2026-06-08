@@ -1,5 +1,5 @@
-import { projectInspectFolder, type FolderInspection } from '@api/projects'
 import { pickFolder } from '@api/dialog'
+import { projectInspectFolder, type FolderInspection } from '@api/projects'
 import Button from '@design-system/Button'
 import Modal from '@design-system/Modal'
 import { createNewProject, openProjectByPath } from '@stores/projects'
@@ -90,7 +90,8 @@ const CreateProjectModal: Component<CreateProjectModalProps> = props => {
     return true
   }
 
-  const submitLabel = (): string => (isCreateMode() ? 'Tạo project' : 'Mở project hiện có')
+  const submitLabel = (): string =>
+    isCreateMode() ? 'Tạo project' : 'Mở project hiện có'
 
   const handleSubmit = async (event: SubmitEvent): Promise<void> => {
     event.preventDefault()
@@ -142,7 +143,8 @@ const CreateProjectModal: Component<CreateProjectModalProps> = props => {
           />
           <Show when={!isCreateMode()}>
             <p class="font-mono text-xs text-text-muted">
-              Tên sẽ được đọc từ <span class="text-text">zimesub.json</span> trong thư mục.
+              Tên sẽ được đọc từ <span class="text-text">zimesub.json</span> trong thư
+              mục.
             </p>
           </Show>
         </label>
@@ -174,7 +176,12 @@ const CreateProjectModal: Component<CreateProjectModalProps> = props => {
 
         <Show when={inspecting()}>
           <p class="flex items-center gap-2 font-mono text-xs text-text-muted">
-            <Loader2 size={14} strokeWidth={1.5} class="animate-spin" aria-hidden="true" />
+            <Loader2
+              size={14}
+              strokeWidth={1.5}
+              class="animate-spin"
+              aria-hidden="true"
+            />
             <span>Đang kiểm tra thư mục...</span>
           </p>
         </Show>
@@ -251,7 +258,12 @@ const CreateProjectModal: Component<CreateProjectModalProps> = props => {
             aria-label={submitLabel()}
           >
             <Show when={submitting()}>
-              <Loader2 size={18} strokeWidth={1.5} class="animate-spin" aria-hidden="true" />
+              <Loader2
+                size={18}
+                strokeWidth={1.5}
+                class="animate-spin"
+                aria-hidden="true"
+              />
             </Show>
             <span>{submitting() ? 'Đang xử lý...' : submitLabel()}</span>
           </Button>

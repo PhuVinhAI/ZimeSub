@@ -19,7 +19,7 @@ use tracing::error;
 
 use crate::episode_state::{self, EpisodeArtifacts};
 use crate::install::{self, InstallRegistry};
-use crate::job_queue::{ExtractSubtitleSpec, JobQueue};
+use crate::job_queue::{ExtractSubtitleSpec, JobQueue, JobSpec, JobsSnapshot};
 use crate::mkv_probe::{self, SubtitleTrack};
 use crate::process_runner::{self, RunSpec};
 use crate::project_store::{
@@ -58,9 +58,18 @@ impl AppState {
 
     /// Lazily spawn the [`JobQueue`] worker task on first use, then
     /// hand back the shared `Arc` handle for subsequent commands.
+    /// The persisted `queue_concurrency_extract` setting seeds the
+    /// tier budget; subsequent changes via `settings_set_queue_concurrency`
+    /// propagate at runtime through `set_extract_concurrency`.
     fn jobs(&self, app: &AppHandle) -> Arc<JobQueue> {
         self.jobs
-            .get_or_init(|| JobQueue::new(app.clone()))
+            .get_or_init(|| {
+                let initial = match self.settings.lock() {
+                    Ok(s) => s.queue_concurrency_extract,
+                    Err(_) => settings_store::DEFAULT_QUEUE_CONCURRENCY_EXTRACT,
+                };
+                JobQueue::new(app.clone(), initial)
+            })
             .clone()
     }
 }
@@ -166,9 +175,21 @@ pub fn project_create(
 
 /// Read `zimesub.json` from `folder` and bump it to the head of
 /// `recent_projects`. Returns the parsed project.
+///
+/// Slice 0008: after the manifest is read, walks every Episode's
+/// folder for 0-byte `.mp4` / `.ass` artefacts and deletes them
+/// (crash-recovery — a Render or ExtractSubtitle that died before
+/// flushing leaves an empty file behind that would otherwise be
+/// misread as a real artefact on next open). Deletions are logged at
+/// `info` and never block the open even on partial failure.
 #[tauri::command]
 pub fn project_open(state: State<'_, AppState>, folder: String) -> Result<ProjectJson, String> {
-    let project = project_store::open_project(Path::new(&folder)).map_err(|e| e.to_string())?;
+    let project_folder = Path::new(&folder);
+    let project = project_store::open_project(project_folder).map_err(|e| e.to_string())?;
+    for episode in &project.episodes {
+        let episode_folder = project_folder.join(&episode.folder_name);
+        let _ = episode_state::clean_stale_artifacts(&episode_folder);
+    }
     touch_recent_and_save(&state, &folder)?;
     Ok(project)
 }
@@ -438,9 +459,9 @@ pub fn episode_inspect_artifacts(
 }
 
 /// Enqueue a fresh `ExtractSubtitle` job for `episode_id` on the
-/// background queue. Returns as soon as the spec is on the channel —
-/// the worker emits `job-started` / `job-progress` / `job-done`
-/// events the frontend's JobsStore subscribes to.
+/// background queue. Returns as soon as the spec is on the queue —
+/// the worker emits `jobs-changed` (full snapshot) and `job-progress`
+/// (per-line) events the frontend subscribes to.
 ///
 /// Pre-conditions enforced here (failure is surfaced as a danger
 /// toast on the frontend rather than a queued job that nobody
@@ -454,8 +475,8 @@ pub fn episode_inspect_artifacts(
 ///    a Vietnamese error string keeps the post-cache-wipe edge case
 ///    debuggable.
 ///
-/// `job_id` is generated frontend-side (uuid) so log + progress +
-/// done events can be correlated with the originating click — same
+/// `job_id` is generated frontend-side (uuid) so progress + change
+/// events can be correlated with the originating click — same
 /// pattern the winget install flow uses.
 #[tauri::command]
 pub async fn extract_subtitle_start(
@@ -492,6 +513,8 @@ pub async fn extract_subtitle_start(
     let spec = ExtractSubtitleSpec {
         job_id,
         episode_id,
+        episode_name: episode.folder_name.clone(),
+        project_folder: project_folder.to_path_buf(),
         mkvextract_path: PathBuf::from(mkvextract_path),
         source_mkv_path: PathBuf::from(&episode.source_mkv_path),
         episode_folder,
@@ -500,14 +523,17 @@ pub async fn extract_subtitle_start(
     };
 
     let jobs = state.jobs(&app);
-    jobs.enqueue_extract_subtitle(spec).await;
+    jobs.enqueue(JobSpec::ExtractSubtitle(spec)).await;
     Ok(())
 }
 
 /// Cancel a queued or running extract-subtitle job by id. Idempotent:
 /// cancelling an already-cancelled or already-finished job is a no-op
 /// and returns `Ok(())`. The job's cleanup pass takes care of removing
-/// any partial output the cancel interrupted.
+/// any partial output the cancel interrupted. Kept as a separate
+/// command (alongside the generic [`job_cancel`]) so existing UI
+/// surfaces that don't yet read the Jobs panel can keep their
+/// per-Episode "Hủy" affordance without churn.
 #[tauri::command]
 pub async fn extract_subtitle_cancel(
     app: AppHandle,
@@ -517,6 +543,87 @@ pub async fn extract_subtitle_cancel(
     let jobs = state.jobs(&app);
     let _ = jobs.cancel(&job_id).await;
     Ok(())
+}
+
+/// Snapshot of the entire `JobQueue` — drives the Jobs panel on
+/// mount. Subsequent updates flow through the `jobs-changed` event
+/// so the panel doesn't have to re-poll.
+#[tauri::command]
+pub async fn job_snapshot(app: AppHandle, state: State<'_, AppState>) -> Result<JobsSnapshot, String> {
+    let jobs = state.jobs(&app);
+    Ok(jobs.snapshot().await)
+}
+
+/// Generic job cancel — same semantics as [`extract_subtitle_cancel`]
+/// but agnostic to `JobKind`. Pending jobs are dropped from the
+/// queue with no on-disk cleanup (matches the AC's "Removing a
+/// Pending Job: just pops from the queue. No process, no cleanup");
+/// Running jobs have their process tree killed and the per-`JobKind`
+/// cleanup pass deletes their partial output.
+#[tauri::command]
+pub async fn job_cancel(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    job_id: String,
+) -> Result<(), String> {
+    let jobs = state.jobs(&app);
+    let _ = jobs.cancel(&job_id).await;
+    Ok(())
+}
+
+/// Remove a Pending job from the queue without touching the process
+/// or on-disk state. Drives the Jobs panel's "Xóa" affordance.
+/// Already-Running / -Done / -Failed / -Cancelled rows are immovable
+/// and this command no-ops on them (the UI hides the button anyway).
+#[tauri::command]
+pub async fn job_remove_pending(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    job_id: String,
+) -> Result<(), String> {
+    let jobs = state.jobs(&app);
+    let _ = jobs.remove_pending(&job_id).await;
+    Ok(())
+}
+
+/// Read the current `queue_concurrency_extract` setting. Returns the
+/// persisted value (forward-compat default supplies `2` for installs
+/// from before slice 0008).
+#[tauri::command]
+pub fn settings_get_queue_concurrency(state: State<'_, AppState>) -> Result<u8, String> {
+    let settings = state
+        .settings
+        .lock()
+        .map_err(|e| format!("settings mutex poisoned: {e}"))?;
+    Ok(settings.queue_concurrency_extract)
+}
+
+/// Update `queue_concurrency_extract` (1–8, clamped) and propagate
+/// the new value to the live `JobQueue` so freed extract slots take
+/// effect for newly-dispatched jobs without a restart, per AC.
+/// Returns the post-clamp value so the UI can echo the actual
+/// stored number even if the input was out of range.
+#[tauri::command]
+pub async fn settings_set_queue_concurrency(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    value: u8,
+) -> Result<u8, String> {
+    let clamped = value.clamp(1, crate::job_queue::MAX_EXTRACT_CONCURRENCY);
+    {
+        let mut settings = state
+            .settings
+            .lock()
+            .map_err(|e| format!("settings mutex poisoned: {e}"))?;
+        settings.queue_concurrency_extract = clamped;
+        if let Err(err) = settings_store::save(&settings) {
+            error!(error = %err, "failed to persist settings.json after queue concurrency change");
+            return Err(err.to_string());
+        }
+    }
+    let jobs = state.jobs(&app);
+    jobs.set_extract_concurrency(clamped).await;
+    Ok(clamped)
 }
 
 /// Move `folder` to the head of `recent_projects` with a fresh

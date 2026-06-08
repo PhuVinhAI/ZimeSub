@@ -213,8 +213,10 @@ export async function manualReprobe(): Promise<void> {
   await rescanTools()
 }
 
-let installSubscriptionsHandle: { unlistenLog: UnlistenFn; unlistenDone: UnlistenFn } | null =
-  null
+let installSubscriptionsHandle: {
+  unlistenLog: UnlistenFn
+  unlistenDone: UnlistenFn
+} | null = null
 let installSubscriptionsPromise: Promise<void> | null = null
 
 async function ensureInstallSubscriptions(): Promise<void> {

@@ -1,11 +1,7 @@
 import type { RecentProjectStatus } from '@api/projects'
 import StatusBadge from '@design-system/StatusBadge'
 import { formatRelativeVi } from '@lib/time'
-import {
-  openProjectByPath,
-  projectsStore,
-  removeRecent
-} from '@stores/projects'
+import { openProjectByPath, projectsStore, removeRecent } from '@stores/projects'
 import { Plus, Trash2 } from 'lucide-solid'
 import { For, Show, type Component } from 'solid-js'
 
@@ -48,9 +44,7 @@ const Sidebar: Component<SidebarProps> = props => {
         </h2>
         <Show
           when={projectsStore.recents.length > 0}
-          fallback={
-            <p class="px-6 pb-5 text-sm text-text-muted">Chưa có project nào.</p>
-          }
+          fallback={<p class="px-6 pb-5 text-sm text-text-muted">Chưa có project nào.</p>}
         >
           <ul class="flex flex-col">
             <For each={projectsStore.recents}>
@@ -146,9 +140,7 @@ const RecentRow: Component<RecentRowProps> = props => {
         <Show
           when={!isMissing()}
           fallback={
-            <p class="font-mono text-xs break-all text-text-muted">
-              {props.recent.path}
-            </p>
+            <p class="font-mono text-xs break-all text-text-muted">{props.recent.path}</p>
           }
         >
           <p class="font-mono text-xs text-text-muted">

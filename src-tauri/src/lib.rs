@@ -55,6 +55,11 @@ pub fn run() {
             commands::episode_inspect_artifacts,
             commands::extract_subtitle_start,
             commands::extract_subtitle_cancel,
+            commands::job_snapshot,
+            commands::job_cancel,
+            commands::job_remove_pending,
+            commands::settings_get_queue_concurrency,
+            commands::settings_set_queue_concurrency,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
