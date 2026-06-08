@@ -18,24 +18,11 @@ import { RefreshCw } from 'lucide-solid'
 import { createEffect, createSignal, For, on, Show, type Component } from 'solid-js'
 
 /**
- * Project-level settings modal. Slice 0009 ships the "Trích xuất
- * audio" sub-form here:
- *  - Codec dropdown (libmp3lame / aac / flac)
- *  - Quality input
- *    * mp3 → `q:a 0..9` VBR (0 = highest, 9 = lowest)
- *    * aac → `b:a NNNk` bitrate
- *    * flac → no extra param (lossless)
+ * Project-level settings modal — Rounded Flat refresh.
  *
- * Slice 0011 adds the "Render" sub-form:
- *  - Encoder dropdown ("auto" + one entry per available_encoder)
- *  - Quality slider 0..100 (default 65)
- *  - Audio bitrate input (default 192 kbps; codec fixed to aac in v1)
- *  - "Quét lại encoder" button next to the dropdown so the user can
- *    refresh the list after installing/upgrading ffmpeg.
- *
- * Mounted as a sibling to the app-level SettingsModal so the user can
- * tell at a glance which scope a tweak applies to: gear-on-project-row
- * = per-project, gear-on-status-bar = app-wide.
+ * Two stacked sections (audio extract / render hardsub), each its own
+ * rounded surface card so the modal reads as two distinct steps in
+ * the per-project configuration wizard.
  */
 interface ProjectSettingsModalProps {
   open: boolean
@@ -63,9 +50,6 @@ const ProjectSettingsModal: Component<ProjectSettingsModalProps> = props => {
   const [probing, setProbing] = createSignal(false)
   const [saving, setSaving] = createSignal(false)
 
-  // Hydrate from the active project whenever the modal opens. Re-runs
-  // when the user re-opens after switching projects so the form
-  // reflects the just-opened project's config.
   createEffect(
     on(
       () => props.open,
@@ -85,7 +69,7 @@ const ProjectSettingsModal: Component<ProjectSettingsModalProps> = props => {
       const outcome = await encoderProbeGetCached()
       setAvailableEncoders(outcome.available_encoders)
     } catch {
-      // Cache miss is non-fatal — the dropdown shows just "Auto".
+      /* cache miss — dropdown shows just "Auto" */
     }
   }
 
@@ -110,8 +94,6 @@ const ProjectSettingsModal: Component<ProjectSettingsModalProps> = props => {
   const applyAudioConfig = (cfg: ExtractAudioConfig): void => {
     const c = (cfg.codec as CodecOption) ?? 'libmp3lame'
     setCodec(['libmp3lame', 'aac', 'flac'].includes(c) ? c : 'libmp3lame')
-    // Pre-fill both quality fields so the user can toggle the codec
-    // dropdown without losing a previously-entered value.
     setMp3Quality(parseMp3Quality(cfg.quality_or_bitrate) ?? '2')
     setAacBitrate(parseAacBitrate(cfg.quality_or_bitrate) ?? '192')
   }
@@ -166,7 +148,7 @@ const ProjectSettingsModal: Component<ProjectSettingsModalProps> = props => {
 
   const footer = (
     <>
-      <Button variant="secondary" onClick={() => props.onClose()} aria-label="Hủy">
+      <Button variant="ghost" onClick={() => props.onClose()} aria-label="Hủy">
         <span>Hủy</span>
       </Button>
       <Button
@@ -188,185 +170,207 @@ const ProjectSettingsModal: Component<ProjectSettingsModalProps> = props => {
       ariaLabel="Cấu hình project"
       footer={footer}
     >
-      <div class="flex flex-col gap-8">
-        <section class="flex flex-col gap-4" aria-label="Cấu hình trích xuất audio">
-          <h3 class="font-mono text-xs font-semibold tracking-[0.18em] text-text-muted">
-            TRÍCH XUẤT AUDIO
-          </h3>
-
-          <div class="border-2 border-border bg-bg px-4 py-4">
-            <div class="flex flex-col gap-4">
-              <div class="flex flex-col gap-2">
-                <label for="audio-codec" class="font-mono text-sm font-medium text-text">
-                  Codec
-                </label>
-                <select
-                  id="audio-codec"
-                  value={codec()}
-                  onChange={e => setCodec(e.currentTarget.value as CodecOption)}
-                  class="h-11 border-2 border-border bg-bg px-3 font-mono text-sm text-text outline-none focus:border-accent"
-                  aria-label="Codec audio"
-                >
-                  <option value="libmp3lame">{CODEC_LABELS.libmp3lame}</option>
-                  <option value="aac">{CODEC_LABELS.aac}</option>
-                  <option value="flac">{CODEC_LABELS.flac}</option>
-                </select>
-              </div>
-
-              <Show when={codec() === 'libmp3lame'}>
-                <div class="flex flex-col gap-2">
-                  <label
-                    for="audio-mp3-quality"
-                    class="font-mono text-sm font-medium text-text"
-                  >
-                    Chất lượng (q:a)
-                  </label>
-                  <p class="text-xs text-text-muted">
-                    0 = chất lượng cao nhất, 9 = thấp nhất. Mặc định: 2.
-                  </p>
-                  <input
-                    id="audio-mp3-quality"
-                    type="number"
-                    min={0}
-                    max={9}
-                    value={mp3Quality()}
-                    onInput={e => setMp3Quality(e.currentTarget.value)}
-                    class="h-11 w-24 border-2 border-border bg-bg px-3 font-mono text-sm text-text outline-none focus:border-accent"
-                    aria-label="Chất lượng VBR mp3"
-                  />
-                </div>
-              </Show>
-
-              <Show when={codec() === 'aac'}>
-                <div class="flex flex-col gap-2">
-                  <label
-                    for="audio-aac-bitrate"
-                    class="font-mono text-sm font-medium text-text"
-                  >
-                    Bitrate (kbps)
-                  </label>
-                  <p class="text-xs text-text-muted">
-                    Khoảng hợp lệ: 32–512 kbps. Mặc định: 192 kbps.
-                  </p>
-                  <input
-                    id="audio-aac-bitrate"
-                    type="number"
-                    min={32}
-                    max={512}
-                    value={aacBitrate()}
-                    onInput={e => setAacBitrate(e.currentTarget.value)}
-                    class="h-11 w-24 border-2 border-border bg-bg px-3 font-mono text-sm text-text outline-none focus:border-accent"
-                    aria-label="Bitrate aac"
-                  />
-                </div>
-              </Show>
-
-              <Show when={codec() === 'flac'}>
-                <p class="text-xs text-text-muted">
-                  FLAC là codec lossless — không cần thông số chất lượng.
-                </p>
-              </Show>
-            </div>
+      <div class="flex flex-col gap-6 pt-4">
+        <section
+          class="flex flex-col gap-4 rounded-2xl bg-elevated p-5"
+          aria-label="Cấu hình trích xuất audio"
+        >
+          <div class="flex items-center gap-3">
+            <span
+              class="flex h-7 w-7 items-center justify-center rounded-full bg-accent font-mono text-[11px] font-semibold text-accent-on-accent"
+              aria-hidden="true"
+            >
+              01
+            </span>
+            <h3 class="font-mono text-[10px] font-semibold tracking-[0.22em] text-text-muted uppercase">
+              Trích xuất audio
+            </h3>
           </div>
-        </section>
 
-        <section class="flex flex-col gap-4" aria-label="Cấu hình render">
-          <h3 class="font-mono text-xs font-semibold tracking-[0.18em] text-text-muted">
-            RENDER (HARDSUB)
-          </h3>
+          <div class="flex flex-col gap-4">
+            <div class="flex flex-col gap-2">
+              <label
+                for="audio-codec"
+                class="font-mono text-[10px] font-semibold tracking-[0.22em] text-text-muted uppercase"
+              >
+                Codec
+              </label>
+              <select
+                id="audio-codec"
+                value={codec()}
+                onChange={e => setCodec(e.currentTarget.value as CodecOption)}
+                class="h-11 rounded-xl border border-border bg-bg px-3 font-mono text-sm text-text outline-none focus:border-accent"
+                aria-label="Codec audio"
+              >
+                <option value="libmp3lame">{CODEC_LABELS.libmp3lame}</option>
+                <option value="aac">{CODEC_LABELS.aac}</option>
+                <option value="flac">{CODEC_LABELS.flac}</option>
+              </select>
+            </div>
 
-          <div class="border-2 border-border bg-bg px-4 py-4">
-            <div class="flex flex-col gap-4">
-              <div class="flex flex-col gap-2">
-                <div class="flex items-end justify-between gap-2">
-                  <label
-                    for="render-encoder"
-                    class="font-mono text-sm font-medium text-text"
-                  >
-                    Encoder
-                  </label>
-                  <Button
-                    variant="secondary"
-                    onClick={() => void handleProbe()}
-                    disabled={probing()}
-                    aria-label="Quét lại encoder khả dụng"
-                  >
-                    <RefreshCw
-                      size={16}
-                      strokeWidth={1.5}
-                      aria-hidden="true"
-                      class={probing() ? 'animate-spin' : ''}
-                    />
-                    <span>{probing() ? 'Đang quét…' : 'Quét lại'}</span>
-                  </Button>
-                </div>
-                <select
-                  id="render-encoder"
-                  value={encoder()}
-                  onChange={e => setEncoder(e.currentTarget.value as EncoderChoice)}
-                  class="h-11 border-2 border-border bg-bg px-3 font-mono text-sm text-text outline-none focus:border-accent"
-                  aria-label="Encoder hardware/CPU"
-                >
-                  <option value="auto">Auto (theo thứ tự ưu tiên)</option>
-                  <For each={availableEncoders()}>
-                    {key => <option value={key}>{ENCODER_LABELS[key]}</option>}
-                  </For>
-                </select>
-                <Show when={availableEncoders().length === 0}>
-                  <p class="text-xs text-warn">
-                    Chưa dò encoder. Nhấn "Quét lại" sau khi ffmpeg đã cài.
-                  </p>
-                </Show>
-              </div>
-
+            <Show when={codec() === 'libmp3lame'}>
               <div class="flex flex-col gap-2">
                 <label
-                  for="render-quality"
-                  class="font-mono text-sm font-medium text-text"
+                  for="audio-mp3-quality"
+                  class="font-mono text-[10px] font-semibold tracking-[0.22em] text-text-muted uppercase"
                 >
-                  Chất lượng: {renderQuality()}
+                  Chất lượng (q:a)
                 </label>
                 <p class="text-xs text-text-muted">
-                  0 = nhỏ/nhanh nhất, 100 = chất lượng cao nhất. Map theo từng encoder
-                  (QSV/NVENC/libx264 = số 28→18; AMF = speed/balanced/quality).
+                  0 = chất lượng cao nhất, 9 = thấp nhất. Mặc định: 2.
                 </p>
                 <input
-                  id="render-quality"
-                  type="range"
+                  id="audio-mp3-quality"
+                  type="number"
                   min={0}
-                  max={100}
-                  step={1}
-                  value={renderQuality()}
-                  onInput={e =>
-                    setRenderQuality(Number.parseInt(e.currentTarget.value, 10) || 0)
-                  }
-                  class="h-11 w-full accent-accent"
-                  aria-label="Chất lượng render"
+                  max={9}
+                  value={mp3Quality()}
+                  onInput={e => setMp3Quality(e.currentTarget.value)}
+                  class="h-11 w-28 rounded-xl border border-border bg-bg px-3 font-mono text-sm text-text outline-none focus:border-accent"
+                  aria-label="Chất lượng VBR mp3"
                 />
               </div>
+            </Show>
 
+            <Show when={codec() === 'aac'}>
               <div class="flex flex-col gap-2">
                 <label
-                  for="render-audio-bitrate"
-                  class="font-mono text-sm font-medium text-text"
+                  for="audio-aac-bitrate"
+                  class="font-mono text-[10px] font-semibold tracking-[0.22em] text-text-muted uppercase"
                 >
-                  Audio AAC bitrate (kbps)
+                  Bitrate (kbps)
                 </label>
                 <p class="text-xs text-text-muted">
-                  Codec audio luôn là <span class="font-mono text-text">aac</span> trong
-                  v1. Khoảng hợp lệ: 32–512 kbps.
+                  Khoảng hợp lệ: 32–512 kbps. Mặc định: 192 kbps.
                 </p>
                 <input
-                  id="render-audio-bitrate"
+                  id="audio-aac-bitrate"
                   type="number"
                   min={32}
                   max={512}
-                  value={renderAudioBitrate()}
-                  onInput={e => setRenderAudioBitrate(e.currentTarget.value)}
-                  class="h-11 w-24 border-2 border-border bg-bg px-3 font-mono text-sm text-text outline-none focus:border-accent"
-                  aria-label="Bitrate audio render"
+                  value={aacBitrate()}
+                  onInput={e => setAacBitrate(e.currentTarget.value)}
+                  class="h-11 w-28 rounded-xl border border-border bg-bg px-3 font-mono text-sm text-text outline-none focus:border-accent"
+                  aria-label="Bitrate aac"
                 />
               </div>
+            </Show>
+
+            <Show when={codec() === 'flac'}>
+              <p class="text-xs text-text-muted">
+                FLAC là codec lossless — không cần thông số chất lượng.
+              </p>
+            </Show>
+          </div>
+        </section>
+
+        <section
+          class="flex flex-col gap-4 rounded-2xl bg-elevated p-5"
+          aria-label="Cấu hình render"
+        >
+          <div class="flex items-center gap-3">
+            <span
+              class="flex h-7 w-7 items-center justify-center rounded-full bg-accent font-mono text-[11px] font-semibold text-accent-on-accent"
+              aria-hidden="true"
+            >
+              02
+            </span>
+            <h3 class="font-mono text-[10px] font-semibold tracking-[0.22em] text-text-muted uppercase">
+              Render (Hardsub)
+            </h3>
+          </div>
+
+          <div class="flex flex-col gap-4">
+            <div class="flex flex-col gap-2">
+              <div class="flex items-end justify-between gap-2">
+                <label
+                  for="render-encoder"
+                  class="font-mono text-[10px] font-semibold tracking-[0.22em] text-text-muted uppercase"
+                >
+                  Encoder
+                </label>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => void handleProbe()}
+                  disabled={probing()}
+                  aria-label="Quét lại encoder khả dụng"
+                >
+                  <RefreshCw
+                    size={14}
+                    strokeWidth={1.5}
+                    aria-hidden="true"
+                    class={probing() ? 'animate-spin' : ''}
+                  />
+                  <span>{probing() ? 'Đang quét…' : 'Quét lại'}</span>
+                </Button>
+              </div>
+              <select
+                id="render-encoder"
+                value={encoder()}
+                onChange={e => setEncoder(e.currentTarget.value as EncoderChoice)}
+                class="h-11 rounded-xl border border-border bg-bg px-3 font-mono text-sm text-text outline-none focus:border-accent"
+                aria-label="Encoder hardware/CPU"
+              >
+                <option value="auto">Auto (theo thứ tự ưu tiên)</option>
+                <For each={availableEncoders()}>
+                  {key => <option value={key}>{ENCODER_LABELS[key]}</option>}
+                </For>
+              </select>
+              <Show when={availableEncoders().length === 0}>
+                <p class="text-xs text-warn">
+                  Chưa dò encoder. Nhấn "Quét lại" sau khi ffmpeg đã cài.
+                </p>
+              </Show>
+            </div>
+
+            <div class="flex flex-col gap-2">
+              <label
+                for="render-quality"
+                class="font-mono text-[10px] font-semibold tracking-[0.22em] text-text-muted uppercase"
+              >
+                Chất lượng · {renderQuality()}
+              </label>
+              <p class="text-xs leading-relaxed text-text-muted">
+                0 = nhỏ/nhanh nhất, 100 = chất lượng cao nhất. Map theo từng encoder
+                (QSV/NVENC/libx264 = số 28→18; AMF = speed/balanced/quality).
+              </p>
+              <input
+                id="render-quality"
+                type="range"
+                min={0}
+                max={100}
+                step={1}
+                value={renderQuality()}
+                onInput={e =>
+                  setRenderQuality(Number.parseInt(e.currentTarget.value, 10) || 0)
+                }
+                class="h-11 w-full accent-accent"
+                aria-label="Chất lượng render"
+              />
+            </div>
+
+            <div class="flex flex-col gap-2">
+              <label
+                for="render-audio-bitrate"
+                class="font-mono text-[10px] font-semibold tracking-[0.22em] text-text-muted uppercase"
+              >
+                Audio AAC bitrate (kbps)
+              </label>
+              <p class="text-xs leading-relaxed text-text-muted">
+                Codec audio luôn là <span class="font-mono text-text">aac</span> trong
+                v1. Khoảng hợp lệ: 32–512 kbps.
+              </p>
+              <input
+                id="render-audio-bitrate"
+                type="number"
+                min={32}
+                max={512}
+                value={renderAudioBitrate()}
+                onInput={e => setRenderAudioBitrate(e.currentTarget.value)}
+                class="h-11 w-28 rounded-xl border border-border bg-bg px-3 font-mono text-sm text-text outline-none focus:border-accent"
+                aria-label="Bitrate audio render"
+              />
             </div>
           </div>
         </section>

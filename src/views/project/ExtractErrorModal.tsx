@@ -4,19 +4,9 @@ import TerminalLog, { type TerminalLogLine } from '@design-system/TerminalLog'
 import { createMemo, Show, type Component } from 'solid-js'
 
 /**
- * Failure-modal for a finished extract-subtitle job. Opened by
+ * Failure modal for a finished extract-subtitle job. Opened by
  * clicking the red "Lỗi extract" badge on an Episode row; renders
- * the captured stderr verbatim via `TerminalLog` so the user can
- * read the underlying mkvextract complaint without digging into
- * `%APPDATA%\ZimeSub\logs\zimesub.log`.
- *
- * `stderr` is supplied via the JobsStore — backend ships the full
- * buffered text on the `job-done` event so the modal opens with no
- * additional IPC round-trip. The optional `errorMessage` adds a
- * Vietnamese summary line above the log when the backend included
- * one (spawn failure, post-extract conversion failure, etc.); on a
- * plain mkvextract non-zero exit the `exitCode` line below tells
- * the same story.
+ * the captured stderr verbatim via `TerminalLog`.
  */
 interface ExtractErrorModalProps {
   open: boolean
@@ -36,7 +26,7 @@ const ExtractErrorModal: Component<ExtractErrorModalProps> = props => {
   })
 
   const footer = (
-    <Button variant="secondary" onClick={() => props.onClose()}>
+    <Button variant="ghost" onClick={() => props.onClose()}>
       <span>Đóng</span>
     </Button>
   )
@@ -50,25 +40,27 @@ const ExtractErrorModal: Component<ExtractErrorModalProps> = props => {
       footer={footer}
       maxWidthClass="max-w-2xl"
     >
-      <div class="flex flex-col gap-4">
+      <div class="flex flex-col gap-5 pt-4">
         <Show when={props.episodeName.length > 0}>
-          <header class="flex flex-col gap-1">
-            <span class="font-mono text-xs font-semibold tracking-[0.18em] text-text-muted">
-              EPISODE
+          <header class="flex flex-col gap-1.5">
+            <span class="font-mono text-[10px] font-semibold tracking-[0.22em] text-text-muted uppercase">
+              Episode
             </span>
             <p class="break-all text-sm text-text">{props.episodeName}</p>
           </header>
         </Show>
 
-        <p class="text-sm text-danger">
-          mkvextract thất bại
-          <Show when={props.exitCode !== null}>
-            <span class="font-mono text-text-muted"> (exit {props.exitCode})</span>
-          </Show>
-          <Show when={props.errorMessage}>
-            {msg => <span class="text-text-muted"> · {msg()}</span>}
-          </Show>
-        </p>
+        <div class="rounded-2xl border border-danger/40 bg-danger-soft px-5 py-4">
+          <p class="text-sm text-danger">
+            mkvextract thất bại
+            <Show when={props.exitCode !== null}>
+              <span class="font-mono text-text-muted"> (exit {props.exitCode})</span>
+            </Show>
+            <Show when={props.errorMessage}>
+              {msg => <span class="text-text-muted"> · {msg()}</span>}
+            </Show>
+          </p>
+        </div>
 
         <TerminalLog
           lines={lines()}

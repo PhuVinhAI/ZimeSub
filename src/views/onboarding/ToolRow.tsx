@@ -14,22 +14,23 @@ import { Download, ExternalLink, RefreshCw, X } from 'lucide-solid'
 import { Match, Show, Switch, type Component } from 'solid-js'
 
 /**
- * One row of the Onboarding tool panel.
+ * One row of the Onboarding tool wizard — Rounded Flat refresh.
+ *
+ * Each tool sits in its own rounded `bg-elevated` card. The leading
+ * step number turns the wizard's top-level Stepper into a 1:1 visual
+ * anchor: row N's bullet on top matches step N here in the body.
  *
  * Layout:
- *   ┌─────────────────────────────────────────────────────────────┐
- *   │ mkvmerge                              [Sẵn sàng]  v84.0     │
- *   │ C:\Program Files\MKVToolNix\mkvmerge.exe                    │
- *   │                              [Cài đặt] / [Hủy] / [Thử lại]  │
- *   └─────────────────────────────────────────────────────────────┘
- *
- * For `Outdated` we surface "current vs minimum" on a second line; for
- * `Missing` we explain where we looked. When the tool is not `Ready` and
- * `winget` is available, an install button is shown; when winget is missing
- * we fall back to "Mở trang tải" + "Tôi đã cài" per the AC.
+ *   ┌────────────────────────────────────────────────────┐
+ *   │ ① mkvmerge                          [Sẵn sàng] v84 │
+ *   │ C:\Program Files\MKVToolNix\mkvmerge.exe           │
+ *   │                       [Cài đặt] / [Hủy] / [Thử lại] │
+ *   └────────────────────────────────────────────────────┘
  */
 interface ToolRowProps {
   report: ToolReport
+  /** 1-based step number shown in the leading bullet. */
+  stepNumber: number
 }
 
 const tone: Record<ToolStatus, BadgeTone> = {
@@ -44,12 +45,6 @@ const badgeLabel: Record<ToolStatus, string> = {
   Missing: 'Chưa cài'
 }
 
-/**
- * Official download pages used by the winget-unavailable fallback. URLs
- * picked to match the same upstream sources as the winget packages — so a
- * user who installs manually ends up with the same MKVToolNix /
- * Gyan.FFmpeg builds they would have gotten via winget.
- */
 const downloadUrl: Record<ToolName, string> = {
   mkvmerge: 'https://mkvtoolnix.download/downloads.html#windows',
   mkvextract: 'https://mkvtoolnix.download/downloads.html#windows',
@@ -60,6 +55,7 @@ const ToolRow: Component<ToolRowProps> = props => {
   const isNotReady = (): boolean => props.report.status !== 'Ready'
   const installingThis = (): boolean => isInstallingTool(props.report.name)
   const anyInstallRunning = (): boolean => toolsStore.install.phase === 'running'
+  const isReady = (): boolean => props.report.status === 'Ready'
 
   const handleInstall = (): void => {
     void startInstall(props.report.name)
@@ -82,15 +78,28 @@ const ToolRow: Component<ToolRowProps> = props => {
   }
 
   return (
-    <div class="flex flex-col gap-3 border-b-2 border-border px-6 py-5 last:border-b-0">
+    <div class="flex flex-col gap-4 rounded-2xl bg-elevated px-5 py-5">
       <div class="flex items-center justify-between gap-4">
-        <div class="flex items-baseline gap-3">
-          <span class="font-mono text-base font-medium text-text">
-            {props.report.name}
+        <div class="flex items-center gap-3">
+          <span
+            class={[
+              'flex h-9 w-9 flex-none items-center justify-center rounded-full font-mono text-xs font-semibold',
+              isReady()
+                ? 'bg-accent text-accent-on-accent'
+                : 'border border-border bg-bg text-text-muted'
+            ].join(' ')}
+            aria-hidden="true"
+          >
+            {String(props.stepNumber).padStart(2, '0')}
           </span>
-          <Show when={props.report.detected_version}>
-            {v => <span class="font-mono text-xs text-text-muted">v{v()}</span>}
-          </Show>
+          <div class="flex items-baseline gap-3">
+            <span class="font-mono text-base font-semibold text-text">
+              {props.report.name}
+            </span>
+            <Show when={props.report.detected_version}>
+              {v => <span class="font-mono text-xs text-text-faint">v{v()}</span>}
+            </Show>
+          </div>
         </div>
         <StatusBadge tone={tone[props.report.status]}>
           {badgeLabel[props.report.status]}
@@ -99,13 +108,21 @@ const ToolRow: Component<ToolRowProps> = props => {
 
       <Switch>
         <Match when={props.report.status === 'Ready' && props.report.resolved_path}>
-          {p => <p class="font-mono text-xs break-all text-text-muted">{p()}</p>}
+          {p => (
+            <p class="rounded-xl border border-border bg-bg px-3 py-2 font-mono text-xs break-all text-text-muted">
+              {p()}
+            </p>
+          )}
         </Match>
 
         <Match when={props.report.status === 'Outdated'}>
-          <div class="flex flex-col gap-1">
+          <div class="flex flex-col gap-1.5">
             <Show when={props.report.resolved_path}>
-              {p => <p class="font-mono text-xs break-all text-text-muted">{p()}</p>}
+              {p => (
+                <p class="rounded-xl border border-border bg-bg px-3 py-2 font-mono text-xs break-all text-text-muted">
+                  {p()}
+                </p>
+              )}
             </Show>
             <p class="text-xs text-warn">
               Phiên bản hiện tại{' '}
@@ -119,7 +136,7 @@ const ToolRow: Component<ToolRowProps> = props => {
         </Match>
 
         <Match when={props.report.status === 'Missing'}>
-          <p class="text-xs text-text-muted">
+          <p class="text-xs leading-relaxed text-text-muted">
             Không tìm thấy trong PATH hoặc thư mục cài đặt mặc định trên Windows.
           </p>
         </Match>
@@ -200,7 +217,7 @@ const InstallingActions: Component<{ onCancel: () => void }> = props => (
       <RefreshCw size={18} strokeWidth={1.5} aria-hidden="true" class="animate-spin" />
       <span>Đang cài...</span>
     </Button>
-    <Button variant="secondary" onClick={props.onCancel} aria-label="Hủy cài đặt">
+    <Button variant="ghost" onClick={props.onCancel} aria-label="Hủy cài đặt">
       <X size={18} strokeWidth={1.5} aria-hidden="true" />
       <span>Hủy</span>
     </Button>

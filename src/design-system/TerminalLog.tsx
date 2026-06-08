@@ -3,15 +3,13 @@ import { createEffect, For, on, type Component } from 'solid-js'
 /**
  * Mono-font, terminal-styled log panel for streaming subprocess output.
  *
- * Used by the Onboarding view for winget install output (slice 0003) and
- * later by the Jobs panel for ffmpeg/mkvextract stderr. Auto-scrolls to
- * the bottom whenever a new line is appended so the user always sees the
- * latest progress without manual scrolling.
+ * Used by Onboarding (winget install output), the Jobs panel (ffmpeg
+ * stderr), and the track picker (mkvmerge failures). Auto-scrolls to
+ * the bottom whenever a new line is appended.
  *
- * stderr lines are tinted `warn` so failures stand out against the bulk
- * stdout output, but no semantic level inference is done — winget routinely
- * uses stderr for non-error progress messages, so flagging them as errors
- * would be misleading.
+ * stderr lines are tinted `warn` so failures stand out against stdout,
+ * but no semantic level inference is done — winget routinely uses
+ * stderr for non-error progress messages.
  */
 export interface TerminalLogLine {
   stream: 'stdout' | 'stderr'
@@ -22,6 +20,8 @@ interface TerminalLogProps {
   lines: TerminalLogLine[]
   ariaLabel?: string
   emptyHint?: string
+  /** Overrides the default 16rem height; useful in slim layouts. */
+  heightClass?: string
 }
 
 const TerminalLog: Component<TerminalLogProps> = props => {
@@ -42,7 +42,10 @@ const TerminalLog: Component<TerminalLogProps> = props => {
       ref={el => {
         scrollEl = el
       }}
-      class="h-64 overflow-y-auto border-2 border-border bg-bg p-3 font-mono text-xs leading-relaxed"
+      class={[
+        'overflow-y-auto rounded-2xl border border-border bg-bg p-4 font-mono text-xs leading-relaxed',
+        props.heightClass ?? 'h-64'
+      ].join(' ')}
       role="log"
       aria-live="polite"
       aria-label={props.ariaLabel ?? 'Nhật ký công cụ'}

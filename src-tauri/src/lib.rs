@@ -18,6 +18,21 @@ use tracing::{info, warn};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    let mut builder = tauri::Builder::default();
+
+    // Devtools registers a global tracing subscriber inside its `init()` call
+    // (it panics via `set_global_default(...).unwrap()` if the slot is taken).
+    // It therefore has to run BEFORE `logging::init()` — otherwise the file
+    // logger claims the slot first and devtools blows up at startup. In debug
+    // builds tracing events flow into the devtools UI; the file logger's
+    // `try_init()` silently no-ops. In release builds devtools is gone, so the
+    // file logger takes the slot as designed.
+    #[cfg(debug_assertions)]
+    {
+        let devtools = tauri_plugin_devtools::init();
+        builder = builder.plugin(devtools);
+    }
+
     if let Err(err) = logging::init() {
         // The log file itself failed to come up — fall back to stderr so the
         // user (or a dev tail-ing the console) still sees the startup error.
@@ -26,14 +41,6 @@ pub fn run() {
     info!("ZimeSub starting (v{})", env!("CARGO_PKG_VERSION"));
     if paths::app_data_dir().is_none() {
         warn!("Roaming AppData directory not available; settings + logs will not persist");
-    }
-
-    let mut builder = tauri::Builder::default();
-
-    #[cfg(debug_assertions)]
-    {
-        let devtools = tauri_plugin_devtools::init();
-        builder = builder.plugin(devtools);
     }
 
     builder

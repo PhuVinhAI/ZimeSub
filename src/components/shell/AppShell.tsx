@@ -29,24 +29,26 @@ import {
 } from 'solid-js'
 
 /**
- * Root layout shell.
+ * Root layout shell — Rounded Flat refresh.
  *
- * Renders one of three exclusive views:
- *  1. Initial probe overlay — brief spinner while `bootstrapTools()` runs,
- *     so the Onboarding panel never flashes in front of stale empty state.
- *  2. Onboarding gate — full-window view when any `RequiredTool` is
- *     `Missing` or `Outdated`. Sidebar, drag-drop, and the bottom status
- *     bar are *not* rendered (per slice 0002 acceptance criteria); install
- *     buttons + live log panel land here (slice 0003).
- *  3. Normal three-region shell (Sidebar / Main / StatusBar). Slice 0004
- *     wires the project store: after Onboarding clears, `bootstrapActiveProject`
- *     auto-opens the most recent project (if any) and the Main region
- *     swaps `EmptyProjectsState` for `ProjectView`. The Create Project
- *     modal is mounted alongside Settings; `Ctrl+N` opens it from any
- *     post-Onboarding state.
+ * The shell renders one of three exclusive views:
+ *  1. Initial probe overlay — brief spinner while `bootstrapTools()` runs.
+ *  2. Onboarding gate — full-window wizard when any RequiredTool is
+ *     `Missing` or `Outdated`. Sidebar + StatusBar are not rendered.
+ *  3. Normal shell — three rounded surface cards arranged as
  *
- * Global keyboard shortcuts boot regardless of gate state — Escape closes
- * any modal that registers itself in `modalStack`. The `Ctrl+N` binding
+ *        +-------+---------------------+
+ *        | Side  |       Main          |
+ *        | bar   |  (project / empty)  |
+ *        +-------+---------------------+
+ *        |          StatusBar          |
+ *        +-----------------------------+
+ *
+ *     with 12px gutters between every card; the outer window padding
+ *     wraps everything so the cards never bleed to the OS chrome.
+ *
+ * Global keyboard shortcuts boot regardless of gate state — Escape
+ * closes any modal that registers itself in `modalStack`. `Ctrl+N`
  * is owned by this component so it disposes cleanly during HMR.
  */
 const AppShell: Component = () => {
@@ -59,21 +61,10 @@ const AppShell: Component = () => {
     const dispose = installGlobalShortcuts()
     onCleanup(dispose)
     void bootstrapTools()
-    // Bind backend job-event listeners once per app instance.
-    // Idempotent — safe across Solid dev double-mount and HMR. The
-    // subscription also pulls the initial snapshot so the status
-    // bar mounts with the live queue state rather than the empty
-    // placeholder.
     void ensureJobSubscriptions()
-    // Pull persisted user settings (only `queue_concurrency_extract`
-    // in slice 0008) so the Settings modal opens with the actual
-    // stored value and the JobQueue tier budget reflects it.
     void bootstrapSettings()
   })
 
-  // Once Onboarding clears, kick off the project bootstrap exactly once.
-  // `createEffect(on(...))` keeps the trigger pure-Solid and disposes on
-  // unmount; `bootstrapActiveProject` itself guards re-entry.
   createEffect(
     on(
       () => allReady(),
@@ -85,13 +76,6 @@ const AppShell: Component = () => {
     )
   )
 
-  // Bridge the projects store to the jobs store whenever the active
-  // project changes: drop the per-Episode state from the previous
-  // project (jobs, artifacts, don't-ask memory) and re-inspect the
-  // disk for every Episode in the new one so each row's badge boots
-  // with the correct "Trống" vs "Đã extract" derivation. Tracked by
-  // (folder, episode count) so re-opening the same project or
-  // appending Episodes both trigger the re-sync.
   createEffect(
     on(
       () => {
@@ -110,12 +94,6 @@ const AppShell: Component = () => {
     )
   )
 
-  // Tauri drag-drop subscription. The handler is bound once per AppShell
-  // mount and ignores events whenever the project gate is not satisfied
-  // (Onboarding running, or no Project open) so dragging files into the
-  // app during Onboarding doesn't pop the overlay. The active-project
-  // check is read live inside the callback rather than wired through a
-  // Solid effect because the Tauri callback is not a reactive scope.
   createEffect(() => {
     let unlisten: (() => void) | undefined
     let cancelled = false
@@ -125,8 +103,6 @@ const AppShell: Component = () => {
           const payload = event.payload
           const ready = allReady() && projectsStore.active !== null
           if (!ready) {
-            // Make sure a stale overlay (e.g. user closed the project mid-
-            // drag) clears immediately rather than getting stuck.
             if (dragOverlayVisible()) setDragOverlayVisible(false)
             return
           }
@@ -152,11 +128,6 @@ const AppShell: Component = () => {
         }
         unlisten = u
       } catch (err) {
-        // Subscription fails on the dev server when webview is not yet
-        // available — log and move on; the next createEffect re-run will
-        // retry. We deliberately don't surface this as a user-visible
-        // toast because drag-drop is a quality-of-life feature, not a
-        // gating one.
         console.error('Failed to bind drag-drop listener', err)
       }
     })()
@@ -188,9 +159,9 @@ const AppShell: Component = () => {
         </Match>
 
         <Match when={allReady()}>
-          <div class="flex min-h-0 flex-1">
+          <div class="flex min-h-0 flex-1 gap-3 p-3 pb-0">
             <Sidebar onCreateProject={() => setCreateProjectOpen(true)} />
-            <main class="flex min-w-0 flex-1 flex-col overflow-auto">
+            <main class="flex min-w-0 flex-1 flex-col overflow-hidden rounded-[28px] border border-border bg-surface">
               <Show
                 when={projectsStore.active && projectsStore.activeFolder}
                 fallback={<EmptyProjectsState />}
@@ -202,11 +173,13 @@ const AppShell: Component = () => {
               </Show>
             </main>
           </div>
-          <StatusBar
-            onOpenSettings={() => setSettingsOpen(true)}
-            onToggleJobsPanel={() => setJobsPanelOpen(prev => !prev)}
-            jobsPanelOpen={jobsPanelOpen()}
-          />
+          <div class="p-3 pt-3">
+            <StatusBar
+              onOpenSettings={() => setSettingsOpen(true)}
+              onToggleJobsPanel={() => setJobsPanelOpen(prev => !prev)}
+              jobsPanelOpen={jobsPanelOpen()}
+            />
+          </div>
           <JobsPanel open={jobsPanelOpen()} onClose={() => setJobsPanelOpen(false)} />
           <SettingsModal open={settingsOpen()} onClose={() => setSettingsOpen(false)} />
           <CreateProjectModal
@@ -226,9 +199,13 @@ const AppShell: Component = () => {
 
 const InitialProbeOverlay: Component = () => (
   <div class="flex h-full w-full items-center justify-center bg-bg px-12 py-16">
-    <div class="flex flex-col items-center gap-4 text-text-muted">
-      <Loader2 size={32} strokeWidth={1.5} class="animate-spin" aria-hidden="true" />
-      <p class="font-mono text-sm tracking-wide">Đang kiểm tra môi trường...</p>
+    <div class="flex flex-col items-center gap-5 text-text-muted">
+      <span class="flex h-16 w-16 items-center justify-center rounded-full border border-border bg-surface">
+        <Loader2 size={28} strokeWidth={1.5} class="animate-spin" aria-hidden="true" />
+      </span>
+      <p class="font-mono text-xs tracking-[0.22em] uppercase">
+        Đang kiểm tra môi trường
+      </p>
     </div>
   </div>
 )

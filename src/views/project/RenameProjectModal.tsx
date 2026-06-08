@@ -10,23 +10,18 @@ interface RenameProjectModalProps {
 }
 
 /**
- * Slice 0012 — rename project modal.
+ * Rename project modal — opens from the ProjectView header.
  *
- * Opens from the project view header's "Đổi tên" button. The text
- * field boots with the current name; on submit the projects store
- * runs the backend rename (folder rename + json `name` field) and
- * the activeFolder is updated to point at the renamed folder. If the
- * folder rename fails (permission, in-use, destination collision)
- * the error toast surfaces the raw OS message and the modal stays
- * open so the user can adjust the name and retry.
+ * On submit the projects store runs the backend rename (folder rename +
+ * `name` field) and updates activeFolder to point at the renamed
+ * folder. If the OS rename fails (permission, in-use, collision) the
+ * raw error surfaces inline and the modal stays open for retry.
  */
 const RenameProjectModal: Component<RenameProjectModalProps> = props => {
   const [name, setName] = createSignal(props.currentName)
   const [saving, setSaving] = createSignal(false)
   const [error, setError] = createSignal<string | null>(null)
 
-  // Re-seed the input every time the modal opens so a stale previous
-  // attempt doesn't bleed into the next launch.
   createEffect(
     on(
       () => props.open,
@@ -67,7 +62,7 @@ const RenameProjectModal: Component<RenameProjectModalProps> = props => {
       ariaLabel="Đổi tên project"
       footer={
         <>
-          <Button variant="secondary" onClick={() => props.onClose()} disabled={saving()}>
+          <Button variant="ghost" onClick={() => props.onClose()} disabled={saving()}>
             Hủy
           </Button>
           <Button
@@ -80,14 +75,16 @@ const RenameProjectModal: Component<RenameProjectModalProps> = props => {
         </>
       }
     >
-      <div class="flex flex-col gap-3">
-        <p class="text-sm text-text-muted">
+      <div class="flex flex-col gap-4 pt-4">
+        <p class="text-sm leading-relaxed text-text-muted">
           Đổi tên project sẽ đổi tên thư mục trên ổ đĩa và cập nhật{' '}
           <span class="font-mono text-text">zimesub.json</span>. Nếu hệ điều hành chặn
           việc đổi tên (file đang mở, không có quyền), file json sẽ không bị thay đổi.
         </p>
-        <label class="flex flex-col gap-1">
-          <span class="font-mono text-xs font-medium text-text">Tên mới</span>
+        <label class="flex flex-col gap-2">
+          <span class="font-mono text-[10px] font-semibold tracking-[0.22em] text-text-muted uppercase">
+            Tên mới
+          </span>
           <input
             type="text"
             value={name()}
@@ -96,13 +93,13 @@ const RenameProjectModal: Component<RenameProjectModalProps> = props => {
               if (e.key === 'Enter' && canSubmit()) void handleSubmit()
             }}
             disabled={saving()}
-            class="h-11 border-2 border-border bg-bg px-3 text-base text-text outline-none focus:border-accent disabled:opacity-60"
+            class="h-12 rounded-2xl border border-border bg-bg px-4 text-base text-text outline-none focus:border-accent disabled:opacity-60"
             aria-label="Tên project mới"
             autofocus
           />
         </label>
         <Show when={error()}>
-          <p class="border-2 border-danger bg-bg px-3 py-2 font-mono text-xs text-danger">
+          <p class="rounded-2xl border border-danger/40 bg-danger-soft px-4 py-3 font-mono text-xs text-danger">
             {error()}
           </p>
         </Show>

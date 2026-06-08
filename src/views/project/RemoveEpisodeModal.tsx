@@ -10,17 +10,6 @@ interface RemoveEpisodeModalProps {
   onClose: () => void
 }
 
-/**
- * Slice 0012 — confirm modal for removing one Episode.
- *
- * The PRD AC string verbatim: "Xoá Episode '<folder_name>'?
- * EpisodeFolder và toàn bộ artifact bên trong sẽ bị xoá. File MKV
- * gốc không bị đụng tới."
- *
- * The destructive button is the only path forward; cancelling
- * closes the modal with no side effects. Backend cancels in-flight
- * jobs for this Episode before deleting the folder.
- */
 const RemoveEpisodeModal: Component<RemoveEpisodeModalProps> = props => {
   const [removing, setRemoving] = createSignal(false)
 
@@ -31,7 +20,7 @@ const RemoveEpisodeModal: Component<RemoveEpisodeModalProps> = props => {
       await removeEpisode(props.episodeId)
       props.onClose()
     } catch {
-      // Store already surfaced the toast.
+      /* toast already surfaced */
     } finally {
       setRemoving(false)
     }
@@ -45,30 +34,25 @@ const RemoveEpisodeModal: Component<RemoveEpisodeModalProps> = props => {
       ariaLabel="Xác nhận xoá Episode"
       footer={
         <>
-          <Button
-            variant="secondary"
-            onClick={() => props.onClose()}
-            disabled={removing()}
-          >
+          <Button variant="ghost" onClick={() => props.onClose()} disabled={removing()}>
             Hủy
           </Button>
           <Button
-            variant="primary"
+            variant="danger"
             onClick={() => void handleConfirm()}
             disabled={removing()}
-            class="border-danger bg-danger text-bg hover:border-danger hover:bg-bg hover:text-danger"
           >
             {removing() ? 'Đang xoá…' : 'Xoá Episode'}
           </Button>
         </>
       }
     >
-      <div class="flex flex-col gap-3">
+      <div class="flex flex-col gap-3 pt-4">
         <p class="text-base text-text">
           Xoá Episode{' '}
           <span class="font-mono text-text">&quot;{props.episodeName}&quot;</span>?
         </p>
-        <p class="text-sm text-text-muted">
+        <p class="text-sm leading-relaxed text-text-muted">
           EpisodeFolder và toàn bộ artifact bên trong sẽ bị xoá. File MKV gốc không bị
           đụng tới.
         </p>

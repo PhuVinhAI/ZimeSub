@@ -4,11 +4,8 @@ import { Show, type Component } from 'solid-js'
 
 /**
  * Overwrite-confirm modal for the "Tạo file .ass.txt" button when
- * `<basename>.eng.ass.txt` already exists. Slice 0010.
- *
- * Simpler than the subtitle/audio variants — the draft is cheap to
- * regenerate so there's no "Không hỏi lại" checkbox; one click to
- * overwrite, one click to cancel, that's the whole interaction.
+ * `<basename>.eng.ass.txt` already exists. Drafts are cheap to
+ * regenerate so there's no "Không hỏi lại" checkbox.
  */
 interface DraftOverwriteConfirmModalProps {
   open: boolean
@@ -22,7 +19,7 @@ const DraftOverwriteConfirmModal: Component<DraftOverwriteConfirmModalProps> = p
 
   const footer = (
     <>
-      <Button variant="secondary" onClick={() => props.onCancel()}>
+      <Button variant="ghost" onClick={() => props.onCancel()}>
         <span>Hủy</span>
       </Button>
       <Button
@@ -43,14 +40,14 @@ const DraftOverwriteConfirmModal: Component<DraftOverwriteConfirmModalProps> = p
       ariaLabel="Xác nhận ghi đè bản nháp dịch"
       footer={footer}
     >
-      <div class="flex flex-col gap-5">
-        <p class="text-sm text-text">
+      <div class="flex flex-col gap-5 pt-4">
+        <p class="text-sm leading-relaxed text-text">
           Episode này đã có sẵn file <code class="font-mono">.eng.ass.txt</code>. Tiếp tục
           sẽ ghi đè nội dung hiện có bằng bản sao mới từ{' '}
           <code class="font-mono">.eng.ass</code>.
         </p>
         <Show when={props.episodeName.length > 0}>
-          <p class="break-all border-2 border-border bg-bg px-3 py-2 font-mono text-xs text-text-muted">
+          <p class="rounded-2xl border border-border bg-bg px-4 py-3 font-mono text-xs break-all text-text-muted">
             {filename()}
           </p>
         </Show>

@@ -22,30 +22,11 @@ import {
 } from 'solid-js'
 
 /**
- * Track-picker modal — slice 0006.
+ * Track-picker modal — Rounded Flat refresh.
  *
- * Lifecycle:
- *  1. On `open` flipping `true`, runs `episode_list_subtitle_tracks`
- *     (which spawns `mkvmerge -i -F json <source_mkv_path>` in the
- *     background) and renders one of four states from the result:
- *       - Loading:    spinner + "Đang phân tích MKV..."
- *       - Error:      stderr in a `TerminalLog` + "Thử lại" button (AC).
- *       - Success:    table of tracks, pre-selected row highlighted per
- *                     backend's `preselected_index` (which already
- *                     applied the AC's three-rule heuristic), or the
- *                     user's previously-saved pick when it's still
- *                     extractable (Đổi track flow).
- *       - No-text:    red banner "Không có subtitle track text-based
- *                     trong file này" — table still shown for context
- *                     so the user sees which bitmap rows exist.
- *  2. User clicks a selectable row (codec `ass` / `srt`). Bitmap and
- *     other rows are non-interactive and styled at reduced opacity.
- *  3. User confirms → backend writes `selected_subtitle_track_id` +
- *     `selected_subtitle_language` to `zimesub.json` and returns the
- *     post-write `ProjectJson`; the store swaps `active`; the modal
- *     closes; the Episode row re-renders with the language tag.
- *
- * All UI strings Vietnamese per PRD § "UI shell & language".
+ * The table is wrapped in a rounded surface card; rows alternate via
+ * `bg-elevated` on the selected row instead of left-border markers,
+ * matching the sidebar's rounded active language.
  */
 interface TrackPickerModalProps {
   open: boolean
@@ -53,21 +34,9 @@ interface TrackPickerModalProps {
   folder: string
   episodeId: string
   episodeName: string
-  /**
-   * Previously-saved selection on this Episode. When non-null and the
-   * track is still present + extractable on re-probe, the modal pre-
-   * selects it instead of the heuristic suggestion. Drives the "Đổi
-   * track" flow — the modal is fully aware of the existing pick.
-   */
   initialTrackId: number | null
 }
 
-/**
- * The modal's internal phase. Discriminated by `kind` so the renderer
- * can narrow without ad-hoc null checks. `saving` keeps the previous
- * `tracks`/`selectedIdx` around so the table doesn't visually clear
- * during the brief `project_set_selected_track` round-trip.
- */
 type Phase =
   | { kind: 'idle' }
   | { kind: 'loading' }
@@ -76,15 +45,6 @@ type Phase =
   | { kind: 'no-text'; tracks: SubtitleTrack[] }
   | { kind: 'saving'; tracks: SubtitleTrack[]; selectedIdx: number }
 
-/**
- * View-model derivation for the table pane. `null` whenever the modal
- * is showing a non-table state (loading / error / idle); otherwise a
- * structurally-stable record the JSX reads reactively via the
- * `createMemo` accessor. Keeping this shape consistent across
- * `success` / `saving` / `no-text` is what lets the `<Show>` keyed
- * branch render the same `<TracksTable>` without remounting on
- * `selectedIdx` ticks.
- */
 interface TableViewModel {
   tracks: SubtitleTrack[]
   selectedIdx: number | null
@@ -167,7 +127,6 @@ const TrackPickerModal: Component<TrackPickerModalProps> = props => {
     }
   }
 
-  /** Reactive view-model for the table pane — `null` for non-table phases. */
   const tableViewModel = createMemo<TableViewModel | null>(() => {
     const cur = phase()
     switch (cur.kind) {
@@ -204,12 +163,12 @@ const TrackPickerModal: Component<TrackPickerModalProps> = props => {
   const footer = (
     <Switch>
       <Match when={phase().kind === 'loading' || phase().kind === 'idle'}>
-        <Button variant="secondary" onClick={() => props.onClose()} disabled>
+        <Button variant="ghost" onClick={() => props.onClose()} disabled>
           <span>Hủy</span>
         </Button>
       </Match>
       <Match when={phase().kind === 'error'}>
-        <Button variant="secondary" onClick={() => props.onClose()}>
+        <Button variant="ghost" onClick={() => props.onClose()}>
           <span>Đóng</span>
         </Button>
         <Button variant="primary" onClick={() => void probe()} aria-label="Thử lại">
@@ -218,12 +177,12 @@ const TrackPickerModal: Component<TrackPickerModalProps> = props => {
         </Button>
       </Match>
       <Match when={phase().kind === 'no-text'}>
-        <Button variant="secondary" onClick={() => props.onClose()}>
+        <Button variant="ghost" onClick={() => props.onClose()}>
           <span>Đóng</span>
         </Button>
       </Match>
       <Match when={phase().kind === 'success'}>
-        <Button variant="secondary" onClick={() => props.onClose()}>
+        <Button variant="ghost" onClick={() => props.onClose()}>
           <span>Hủy</span>
         </Button>
         <Button
@@ -236,7 +195,7 @@ const TrackPickerModal: Component<TrackPickerModalProps> = props => {
         </Button>
       </Match>
       <Match when={phase().kind === 'saving'}>
-        <Button variant="secondary" onClick={() => props.onClose()} disabled>
+        <Button variant="ghost" onClick={() => props.onClose()} disabled>
           <span>Hủy</span>
         </Button>
         <Button variant="primary" disabled aria-label="Đang lưu">
@@ -256,10 +215,10 @@ const TrackPickerModal: Component<TrackPickerModalProps> = props => {
       footer={footer}
       maxWidthClass="max-w-3xl"
     >
-      <div class="flex flex-col gap-5">
-        <header class="flex flex-col gap-1">
-          <span class="font-mono text-xs font-semibold tracking-[0.18em] text-text-muted">
-            EPISODE
+      <div class="flex flex-col gap-5 pt-4">
+        <header class="flex flex-col gap-1.5">
+          <span class="font-mono text-[10px] font-semibold tracking-[0.22em] text-text-muted uppercase">
+            Episode
           </span>
           <p class="break-all text-sm text-text">{props.episodeName}</p>
         </header>
@@ -274,7 +233,7 @@ const TrackPickerModal: Component<TrackPickerModalProps> = props => {
           <Match when={tableViewModel() !== null}>
             <Show when={phase().kind === 'no-text'}>
               <div
-                class="border-2 border-danger bg-bg px-3 py-2 text-sm text-danger"
+                class="rounded-2xl border border-danger/40 bg-danger-soft px-4 py-3 text-sm text-danger"
                 role="alert"
               >
                 Không có subtitle track text-based trong file này.
@@ -299,17 +258,16 @@ const TrackPickerModal: Component<TrackPickerModalProps> = props => {
 
 const LoadingPane: Component = () => (
   <div
-    class="flex min-h-[200px] flex-col items-center justify-center gap-3 border-2 border-border bg-bg px-6 py-12 text-center"
+    class="flex min-h-[200px] flex-col items-center justify-center gap-4 rounded-2xl bg-bg px-6 py-12 text-center"
     role="status"
     aria-live="polite"
   >
-    <Loader2
-      size={28}
-      strokeWidth={1.5}
-      class="animate-spin text-text-muted"
-      aria-hidden="true"
-    />
-    <p class="font-mono text-xs tracking-wide text-text-muted">Đang phân tích MKV...</p>
+    <span class="flex h-14 w-14 items-center justify-center rounded-full border border-border bg-elevated text-text-muted">
+      <Loader2 size={24} strokeWidth={1.5} class="animate-spin" aria-hidden="true" />
+    </span>
+    <p class="font-mono text-[11px] tracking-[0.18em] text-text-muted uppercase">
+      Đang phân tích MKV
+    </p>
   </div>
 )
 
@@ -320,13 +278,15 @@ interface ErrorPaneProps {
 
 const ErrorPane: Component<ErrorPaneProps> = props => (
   <div class="flex flex-col gap-3" role="alert">
-    <p class="text-sm text-danger">
-      mkvmerge thất bại
-      <Show when={props.exitCode !== null}>
-        <span class="font-mono text-text-muted"> (exit {props.exitCode})</span>
-      </Show>
-      . Kiểm tra file MKV còn tồn tại và bạn có quyền đọc.
-    </p>
+    <div class="rounded-2xl border border-danger/40 bg-danger-soft px-4 py-3">
+      <p class="text-sm text-danger">
+        mkvmerge thất bại
+        <Show when={props.exitCode !== null}>
+          <span class="font-mono text-text-muted"> (exit {props.exitCode})</span>
+        </Show>
+        . Kiểm tra file MKV còn tồn tại và bạn có quyền đọc.
+      </p>
+    </div>
     <TerminalLog
       lines={props.lines}
       ariaLabel="Lỗi mkvmerge"
@@ -345,27 +305,27 @@ interface TracksTableProps {
 const TracksTable: Component<TracksTableProps> = props => {
   return (
     <div
-      class="border-2 border-border bg-bg"
+      class="overflow-hidden rounded-2xl bg-bg"
       role="region"
       aria-label="Danh sách subtitle track"
     >
       <table class="w-full border-collapse">
         <thead>
-          <tr class="border-b-2 border-border">
-            <th class="w-10 px-3 py-2" aria-label="Đã chọn"></th>
-            <th class="w-14 px-3 py-2 text-left font-mono text-xs font-semibold tracking-[0.16em] text-text-muted uppercase">
+          <tr class="bg-elevated">
+            <th class="w-10 px-3 py-3" aria-label="Đã chọn"></th>
+            <th class="w-14 px-3 py-3 text-left font-mono text-[10px] font-semibold tracking-[0.16em] text-text-muted uppercase">
               #
             </th>
-            <th class="w-24 px-3 py-2 text-left font-mono text-xs font-semibold tracking-[0.16em] text-text-muted uppercase">
+            <th class="w-24 px-3 py-3 text-left font-mono text-[10px] font-semibold tracking-[0.16em] text-text-muted uppercase">
               Ngôn ngữ
             </th>
-            <th class="w-32 px-3 py-2 text-left font-mono text-xs font-semibold tracking-[0.16em] text-text-muted uppercase">
+            <th class="w-32 px-3 py-3 text-left font-mono text-[10px] font-semibold tracking-[0.16em] text-text-muted uppercase">
               Codec
             </th>
-            <th class="px-3 py-2 text-left font-mono text-xs font-semibold tracking-[0.16em] text-text-muted uppercase">
+            <th class="px-3 py-3 text-left font-mono text-[10px] font-semibold tracking-[0.16em] text-text-muted uppercase">
               Tiêu đề
             </th>
-            <th class="w-40 px-3 py-2 text-left font-mono text-xs font-semibold tracking-[0.16em] text-text-muted uppercase">
+            <th class="w-40 px-3 py-3 text-left font-mono text-[10px] font-semibold tracking-[0.16em] text-text-muted uppercase">
               Cờ
             </th>
           </tr>
@@ -376,7 +336,6 @@ const TracksTable: Component<TracksTableProps> = props => {
               <TrackRow
                 track={track}
                 isSelected={idx() === props.selectedIdx}
-                isLast={idx() === props.tracks.length - 1}
                 disabled={props.disabled}
                 onSelect={() => props.onSelect(idx())}
               />
@@ -391,7 +350,6 @@ const TracksTable: Component<TracksTableProps> = props => {
 interface TrackRowProps {
   track: SubtitleTrack
   isSelected: boolean
-  isLast: boolean
   disabled: boolean
   onSelect: () => void
 }
@@ -413,9 +371,8 @@ const TrackRow: Component<TrackRowProps> = props => {
   return (
     <tr
       class={[
-        props.isLast ? '' : 'border-b-2 border-border',
         interactive()
-          ? `cursor-pointer transition-colors hover:bg-surface ${props.isSelected ? 'bg-surface' : ''}`
+          ? `cursor-pointer transition-colors hover:bg-elevated/60 ${props.isSelected ? 'bg-elevated' : ''}`
           : 'opacity-50'
       ].join(' ')}
       onClick={handleClick}
@@ -427,12 +384,9 @@ const TrackRow: Component<TrackRowProps> = props => {
     >
       <td class="w-10 px-3 py-3">
         <Show when={props.isSelected}>
-          <Check
-            size={18}
-            strokeWidth={1.5}
-            class="text-accent"
-            aria-label="Track đã chọn"
-          />
+          <span class="flex h-6 w-6 items-center justify-center rounded-full bg-accent text-accent-on-accent">
+            <Check size={14} strokeWidth={2} aria-label="Track đã chọn" />
+          </span>
         </Show>
       </td>
       <td class="w-14 px-3 py-3 font-mono text-sm text-text">
@@ -445,10 +399,10 @@ const TrackRow: Component<TrackRowProps> = props => {
         <div class="flex flex-col gap-1">
           <span class="font-mono text-sm text-text uppercase">{props.track.codec}</span>
           <Show when={props.track.kind === 'bitmap'}>
-            <StatusBadge tone="warn">Bitmap — không hỗ trợ</StatusBadge>
+            <StatusBadge tone="warn">Bitmap</StatusBadge>
           </Show>
           <Show when={props.track.kind === 'other'}>
-            <StatusBadge tone="warn">Không hỗ trợ</StatusBadge>
+            <StatusBadge tone="warn">N/A</StatusBadge>
           </Show>
         </div>
       </td>
@@ -460,17 +414,17 @@ const TrackRow: Component<TrackRowProps> = props => {
       <td class="w-40 px-3 py-3">
         <div class="flex flex-wrap gap-1 font-mono text-[10px] uppercase tracking-wide">
           <Show when={props.track.is_default}>
-            <span class="border-2 border-border bg-bg px-1.5 py-0.5 text-text-muted">
+            <span class="rounded-full bg-elevated px-2 py-0.5 text-text-muted">
               Mặc định
             </span>
           </Show>
           <Show when={props.track.is_forced}>
-            <span class="border-2 border-border bg-bg px-1.5 py-0.5 text-text-muted">
+            <span class="rounded-full bg-elevated px-2 py-0.5 text-text-muted">
               Buộc
             </span>
           </Show>
           <Show when={!props.track.is_default && !props.track.is_forced}>
-            <span class="text-text-muted">—</span>
+            <span class="text-text-faint">—</span>
           </Show>
         </div>
       </td>
@@ -478,19 +432,6 @@ const TrackRow: Component<TrackRowProps> = props => {
   )
 }
 
-/**
- * Resolve the initial highlight for the picker on open.
- *
- * Precedence:
- *  1. Previously-saved selection (Đổi track flow), iff the track is
- *     still present in the freshly-probed list AND still extractable.
- *     This means "Đổi track" lands on the user's last pick by default
- *     even if the heuristic would have chosen differently.
- *  2. Backend's heuristic suggestion (`preselected_index`) from the
- *     three AC rules — already computed in pure Rust against the
- *     same `SubtitleTrack` list so frontend + backend stay in lockstep.
- *  3. `null` — caller shows the no-text state.
- */
 function pickInitialIndex(
   tracks: SubtitleTrack[],
   heuristicIdx: number | null,

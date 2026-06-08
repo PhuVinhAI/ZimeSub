@@ -3,31 +3,49 @@
 @import 'tailwindcss';
 
 /**
- * ZimeSub design tokens.
+ * ZimeSub design tokens — Rounded Flat refresh.
+ *
+ * Pure flat dark, single electric green accent. No shadow / no gradient /
+ * no blur (enforced by scripts/lint-forbidden-classes.mjs).
+ *
+ * Depth is conveyed by THREE background tones (bg < surface < elevated)
+ * plus generous radii, not by drop shadows. Section separators are NOT
+ * single-side borders — they are gaps between rounded cards.
  *
  * Style guide: docs/style-guide.md.
- * Pure flat dark, single electric green accent. Borders (2–3 px) replace shadow
- * as the section separator language. shadow-*, bg-gradient-*, backdrop-blur-*,
- * drop-shadow-* utilities are forbidden — enforced by scripts/lint-forbidden-classes.mjs.
  */
 
 @theme {
   --color-bg: #0a0a0a;
-  --color-surface: #141414;
-  --color-border: #262626;
-  --color-border-strong: #ffffff;
+  --color-surface: #161616;
+  --color-elevated: #1f1f1f;
+  --color-border: #2a2a2a;
+  --color-border-strong: #404040;
   --color-text: #f5f5f5;
-  --color-text-muted: #737373;
+  --color-text-muted: #8a8a8a;
+  --color-text-faint: #555555;
   --color-accent: #00ff66;
+  --color-accent-soft: #003a18;
   --color-accent-on-accent: #000000;
   --color-danger: #ff3b30;
+  --color-danger-soft: #3a0d0b;
   --color-warn: #ffb800;
+  --color-warn-soft: #3a2a00;
 
   --font-sans: 'Geist Variable', system-ui, -apple-system, 'Segoe UI', sans-serif;
   --font-mono:
     'Geist Mono Variable', ui-monospace, 'Cascadia Mono', 'Consolas', monospace;
 
-  --radius-sm: 4px;
+  /*
+   * Generous radius scale. The wizard refresh uses 22px / 32px as the
+   * dominant card languages — small chips drop to 10px so the rounded
+   * vocabulary still feels distinct at every scale.
+   */
+  --radius-sm: 10px;
+  --radius-md: 16px;
+  --radius-lg: 22px;
+  --radius-xl: 32px;
+  --radius-2xl: 40px;
 }
 
 @layer base {
@@ -56,5 +74,25 @@
   .lucide {
     stroke-width: 1.5;
     fill: none;
+  }
+
+  /*
+   * Custom scrollbar so panels feel intentional even when the user is
+   * scrolling — narrow track, rounded thumb, no border-radius surprise
+   * at the corners of cards.
+   */
+  *::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  *::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  *::-webkit-scrollbar-thumb {
+    background: var(--color-border);
+    border-radius: 999px;
+  }
+  *::-webkit-scrollbar-thumb:hover {
+    background: var(--color-border-strong);
   }
 }

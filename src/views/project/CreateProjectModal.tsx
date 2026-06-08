@@ -12,21 +12,14 @@ interface CreateProjectModalProps {
 }
 
 /**
- * Modal opened by the Sidebar "Tạo project" CTA (slice 0004).
+ * Create Project modal — Rounded Flat refresh.
  *
  * Flow:
- *  1. User enters a project name (required, non-empty) and clicks
- *     "Chọn thư mục" — invokes the OS folder picker via
- *     `tauri-plugin-dialog`.
+ *  1. User enters a project name and clicks "Chọn thư mục" — invokes
+ *     the OS folder picker.
  *  2. Once a folder is selected, the backend inspects it and we route
- *     between three CTAs:
- *      - empty / non-existent → "Tạo project" (primary)
- *      - has zimesub.json     → "Mở project hiện có" (primary), with
- *        the existing project name previewed
- *      - non-empty, no json   → inline error, CTA disabled
+ *     between three CTAs (create, open existing, blocked).
  *  3. On submit, the store is updated and the modal closes.
- *
- * Strings are Vietnamese per PRD § "UI shell & language".
  */
 const CreateProjectModal: Component<CreateProjectModalProps> = props => {
   const [name, setName] = createSignal('')
@@ -123,10 +116,10 @@ const CreateProjectModal: Component<CreateProjectModalProps> = props => {
       title="Tạo project mới"
       ariaLabel="Tạo project mới"
     >
-      <form class="flex flex-col gap-5" onSubmit={e => void handleSubmit(e)}>
+      <form class="flex flex-col gap-5 pt-4" onSubmit={e => void handleSubmit(e)}>
         <label class="flex flex-col gap-2">
-          <span class="font-mono text-xs font-semibold tracking-[0.18em] text-text-muted">
-            TÊN PROJECT
+          <span class="font-mono text-[10px] font-semibold tracking-[0.22em] text-text-muted uppercase">
+            Tên project
           </span>
           <input
             type="text"
@@ -138,11 +131,11 @@ const CreateProjectModal: Component<CreateProjectModalProps> = props => {
             disabled={!isCreateMode() || submitting()}
             onInput={e => setName(e.currentTarget.value)}
             placeholder="Ví dụ: Oi Tonbo 2nd Season"
-            class="h-11 border-2 border-border bg-bg px-3 font-sans text-sm text-text placeholder:text-text-muted focus:border-accent focus:outline-none disabled:opacity-70"
+            class="h-12 rounded-2xl border border-border bg-bg px-4 font-sans text-sm text-text placeholder:text-text-faint focus:border-accent focus:outline-none disabled:opacity-70"
             aria-required="true"
           />
           <Show when={!isCreateMode()}>
-            <p class="font-mono text-xs text-text-muted">
+            <p class="font-mono text-[11px] text-text-muted">
               Tên sẽ được đọc từ <span class="text-text">zimesub.json</span> trong thư
               mục.
             </p>
@@ -150,8 +143,8 @@ const CreateProjectModal: Component<CreateProjectModalProps> = props => {
         </label>
 
         <div class="flex flex-col gap-2">
-          <span class="font-mono text-xs font-semibold tracking-[0.18em] text-text-muted">
-            THƯ MỤC
+          <span class="font-mono text-[10px] font-semibold tracking-[0.22em] text-text-muted uppercase">
+            Thư mục
           </span>
           <Button
             variant="secondary"
@@ -165,7 +158,7 @@ const CreateProjectModal: Component<CreateProjectModalProps> = props => {
           <Show when={folder()}>
             {f => (
               <p
-                class="border-2 border-border bg-bg px-3 py-2 font-mono text-xs break-all text-text"
+                class="rounded-2xl border border-border bg-bg px-4 py-3 font-mono text-xs break-all text-text"
                 aria-label="Đường dẫn thư mục đã chọn"
               >
                 {f()}
@@ -191,7 +184,7 @@ const CreateProjectModal: Component<CreateProjectModalProps> = props => {
             <Switch>
               <Match when={ins().has_zimesub_json}>
                 <p
-                  class="border-2 border-accent bg-bg px-3 py-2 text-xs text-accent"
+                  class="rounded-2xl border border-accent/40 bg-accent-soft px-4 py-3 text-xs text-accent"
                   role="status"
                 >
                   Thư mục đã có project ZimeSub
@@ -203,7 +196,7 @@ const CreateProjectModal: Component<CreateProjectModalProps> = props => {
               </Match>
               <Match when={ins().exists && !ins().is_empty && !ins().has_zimesub_json}>
                 <p
-                  class="border-2 border-danger bg-bg px-3 py-2 text-xs text-danger"
+                  class="rounded-2xl border border-danger/40 bg-danger-soft px-4 py-3 text-xs text-danger"
                   role="alert"
                 >
                   Thư mục đã có file khác. Hãy chọn thư mục trống hoặc thư mục đã có{' '}
@@ -212,7 +205,7 @@ const CreateProjectModal: Component<CreateProjectModalProps> = props => {
               </Match>
               <Match when={!ins().exists}>
                 <p
-                  class="border-2 border-border bg-bg px-3 py-2 text-xs text-text-muted"
+                  class="rounded-2xl border border-border bg-bg px-4 py-3 text-xs text-text-muted"
                   role="status"
                 >
                   Thư mục chưa tồn tại — sẽ được tạo khi nhấn "Tạo project".
@@ -220,7 +213,7 @@ const CreateProjectModal: Component<CreateProjectModalProps> = props => {
               </Match>
               <Match when={ins().exists && ins().is_empty}>
                 <p
-                  class="border-2 border-border bg-bg px-3 py-2 text-xs text-text-muted"
+                  class="rounded-2xl border border-border bg-bg px-4 py-3 text-xs text-text-muted"
                   role="status"
                 >
                   Thư mục trống. Sẵn sàng để tạo project mới.
@@ -233,7 +226,7 @@ const CreateProjectModal: Component<CreateProjectModalProps> = props => {
         <Show when={submitError()}>
           {err => (
             <p
-              class="border-2 border-danger bg-bg px-3 py-2 text-xs text-danger"
+              class="rounded-2xl border border-danger/40 bg-danger-soft px-4 py-3 text-xs text-danger"
               role="alert"
             >
               {err()}
@@ -241,9 +234,9 @@ const CreateProjectModal: Component<CreateProjectModalProps> = props => {
           )}
         </Show>
 
-        <div class="flex items-center justify-end gap-3 border-t-2 border-border pt-4">
+        <div class="flex items-center justify-end gap-3 pt-1">
           <Button
-            variant="secondary"
+            variant="ghost"
             type="button"
             onClick={handleClose}
             disabled={submitting()}

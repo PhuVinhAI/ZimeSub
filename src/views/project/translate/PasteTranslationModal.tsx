@@ -6,17 +6,15 @@ import { artifactStateFor, refreshArtifactsForEpisode } from '@stores/jobs'
 import { createEffect, createSignal, on, Show, type Component } from 'solid-js'
 
 /**
- * Paste-translation modal — "Dán bản dịch" button. Slice 0010 AC 3.
+ * Paste-translation modal — "Dán bản dịch" button.
  *
- * Renders a large Geist Mono textarea (≥ 20 rows per AC) the user
- * pastes the full translated ASS into; clicking "Lưu" writes it to
- * `<basename>.vietsub.ass` via {@link episodeWriteTranslated}.
+ * Renders a large Geist Mono textarea (≥ 20 rows) the user pastes the
+ * full translated ASS into; clicking "Lưu" writes it to
+ * `<basename>.vietsub.ass`.
  *
- * Overwrite handling: the first save attempt with `overwrite = false`
- * surfaces an in-modal yellow banner ("Đã có file vietsub.ass — Ghi đè
- * và lưu?"). The "Ghi đè và lưu" button then re-invokes with
- * `overwrite = true`. The banner is preferred over a stacked modal so
- * the user keeps the pasted content visible while deciding.
+ * Overwrite handling: the first save with `overwrite = false` shows
+ * an in-modal yellow banner; "Ghi đè và lưu" then re-invokes with
+ * `overwrite = true`.
  */
 interface PasteTranslationModalProps {
   open: boolean
@@ -31,8 +29,6 @@ const PasteTranslationModal: Component<PasteTranslationModalProps> = props => {
   const [saving, setSaving] = createSignal(false)
   const [showOverwriteBanner, setShowOverwriteBanner] = createSignal(false)
 
-  // Reset state every time the modal opens fresh so we never carry an
-  // old paste from one Episode into another.
   createEffect(
     on(
       () => props.open,
@@ -83,7 +79,7 @@ const PasteTranslationModal: Component<PasteTranslationModalProps> = props => {
   const footer = (
     <>
       <Button
-        variant="secondary"
+        variant="ghost"
         onClick={() => props.onClose()}
         disabled={saving()}
         aria-label="Đóng và hủy bản dán"
@@ -129,8 +125,8 @@ const PasteTranslationModal: Component<PasteTranslationModalProps> = props => {
       footer={footer}
       maxWidthClass="max-w-4xl"
     >
-      <div class="flex flex-col gap-4">
-        <p class="text-sm text-text">
+      <div class="flex flex-col gap-4 pt-4">
+        <p class="text-sm leading-relaxed text-text">
           Dán toàn bộ nội dung file ASS đã dịch vào ô bên dưới. Khi lưu, ZimeSub sẽ ghi
           file <code class="font-mono">{targetFilename()}</code> vào EpisodeFolder.
         </p>
@@ -141,7 +137,7 @@ const PasteTranslationModal: Component<PasteTranslationModalProps> = props => {
           }
         >
           <div
-            class="border-2 border-warn bg-bg px-3 py-2 font-mono text-xs text-warn"
+            class="rounded-2xl border border-warn/40 bg-warn-soft px-4 py-3 font-mono text-xs text-warn"
             role="alert"
           >
             File <code>{targetFilename()}</code> đã tồn tại. Nhấn "Ghi đè và lưu" để thay
@@ -150,7 +146,7 @@ const PasteTranslationModal: Component<PasteTranslationModalProps> = props => {
         </Show>
 
         <textarea
-          class="block w-full resize-y border-2 border-border bg-bg px-3 py-2 font-mono text-xs leading-relaxed text-text outline-none focus:border-accent"
+          class="block w-full resize-y rounded-2xl border border-border bg-bg px-4 py-3 font-mono text-xs leading-relaxed text-text outline-none focus:border-accent"
           rows={22}
           value={content()}
           onInput={e => {
@@ -162,7 +158,7 @@ const PasteTranslationModal: Component<PasteTranslationModalProps> = props => {
           spellcheck={false}
         />
 
-        <div class="flex items-center justify-between font-mono text-[11px] text-text-muted">
+        <div class="flex items-center justify-between font-mono text-[10px] tracking-wide text-text-muted">
           <span>{charCount().toLocaleString('vi-VN')} ký tự</span>
           <span>UTF-8 · LF/CRLF tự động</span>
         </div>

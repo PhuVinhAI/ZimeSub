@@ -11,16 +11,12 @@ interface DeleteProjectModalProps {
 }
 
 /**
- * Slice 0012 — strong two-step confirm modal for deleting a project.
+ * Strong two-step confirm modal for deleting a project.
  *
  * Lists what will be deleted (ProjectFolder content) and what will
  * NOT (SourceMkv files outside it). The destructive button stays
  * disabled until the user types the project name verbatim into the
  * confirmation field — defends against muscle-memory mis-clicks.
- *
- * Backend cancels every in-flight job belonging to this project
- * before recursively removing the folder; the recents MRU is
- * refreshed so the deleted project disappears from the Sidebar.
  */
 const DeleteProjectModal: Component<DeleteProjectModalProps> = props => {
   const [confirmation, setConfirmation] = createSignal('')
@@ -48,8 +44,7 @@ const DeleteProjectModal: Component<DeleteProjectModalProps> = props => {
       await deleteActiveProject()
       props.onClose()
     } catch {
-      // Store already surfaced the toast; keep modal open so the user
-      // can retry after fixing the underlying issue.
+      /* toast already surfaced */
     } finally {
       setDeleting(false)
     }
@@ -63,34 +58,29 @@ const DeleteProjectModal: Component<DeleteProjectModalProps> = props => {
       ariaLabel="Xác nhận xoá project"
       footer={
         <>
-          <Button
-            variant="secondary"
-            onClick={() => props.onClose()}
-            disabled={deleting()}
-          >
+          <Button variant="ghost" onClick={() => props.onClose()} disabled={deleting()}>
             Hủy
           </Button>
           <Button
-            variant="primary"
+            variant="danger"
             onClick={() => void handleConfirm()}
             disabled={!canDelete()}
-            class="border-danger bg-danger text-bg hover:border-danger hover:bg-bg hover:text-danger disabled:border-border disabled:bg-border disabled:text-text-muted"
           >
             {deleting() ? 'Đang xoá…' : 'Xoá vĩnh viễn'}
           </Button>
         </>
       }
     >
-      <div class="flex flex-col gap-3">
+      <div class="flex flex-col gap-4 pt-4">
         <p class="text-base text-text">
           Bạn sắp xoá vĩnh viễn project{' '}
           <span class="font-mono text-text">&quot;{props.projectName}&quot;</span>.
         </p>
-        <div class="border-2 border-danger bg-bg px-3 py-3">
-          <p class="font-mono text-xs font-semibold tracking-[0.18em] text-danger uppercase">
-            SẼ BỊ XOÁ
+        <div class="rounded-2xl border border-danger/40 bg-danger-soft px-5 py-4">
+          <p class="font-mono text-[10px] font-semibold tracking-[0.22em] text-danger uppercase">
+            Sẽ bị xoá
           </p>
-          <ul class="mt-2 list-disc pl-5 text-sm text-text">
+          <ul class="mt-2 list-disc pl-5 text-sm leading-relaxed text-text">
             <li>
               Toàn bộ nội dung trong thư mục{' '}
               <span class="font-mono text-text-muted">{props.folder}</span>
@@ -102,17 +92,17 @@ const DeleteProjectModal: Component<DeleteProjectModalProps> = props => {
             <li>Entry tương ứng trong danh sách Project gần đây</li>
           </ul>
         </div>
-        <div class="border-2 border-accent bg-bg px-3 py-3">
-          <p class="font-mono text-xs font-semibold tracking-[0.18em] text-accent uppercase">
-            KHÔNG BỊ XOÁ
+        <div class="rounded-2xl border border-accent/40 bg-accent-soft px-5 py-4">
+          <p class="font-mono text-[10px] font-semibold tracking-[0.22em] text-accent uppercase">
+            Không bị xoá
           </p>
-          <ul class="mt-2 list-disc pl-5 text-sm text-text">
+          <ul class="mt-2 list-disc pl-5 text-sm leading-relaxed text-text">
             <li>File MKV gốc nằm ngoài thư mục project (ADR-0001).</li>
             <li>Cấu hình app-level và lịch sử log.</li>
           </ul>
         </div>
-        <label class="flex flex-col gap-1">
-          <span class="font-mono text-xs font-medium text-text">
+        <label class="flex flex-col gap-2">
+          <span class="font-mono text-[10px] font-semibold tracking-[0.22em] text-text-muted uppercase">
             Gõ tên project để xác nhận:{' '}
             <span class="text-accent">{props.projectName}</span>
           </span>
@@ -124,7 +114,7 @@ const DeleteProjectModal: Component<DeleteProjectModalProps> = props => {
               if (e.key === 'Enter' && canDelete()) void handleConfirm()
             }}
             disabled={deleting()}
-            class="h-11 border-2 border-border bg-bg px-3 font-mono text-base text-text outline-none focus:border-danger disabled:opacity-60"
+            class="h-12 rounded-2xl border border-border bg-bg px-4 font-mono text-base text-text outline-none focus:border-danger disabled:opacity-60"
             aria-label="Nhập tên project để xác nhận xoá"
             autofocus
           />

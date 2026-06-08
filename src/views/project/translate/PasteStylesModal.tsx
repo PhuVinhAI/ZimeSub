@@ -13,21 +13,12 @@ import {
 } from 'solid-js'
 
 /**
- * Paste-styles modal — "Dán [V4+ Styles]" button. Slice 0010 AC 4.
+ * Paste-styles modal — "Dán [V4+ Styles]" button.
  *
- * Renders a Geist Mono textarea for the user to paste a fresh
- * `[V4+ Styles]` block. Client-side validation matches the backend's
- * [`validate_styles_block`] check exactly:
- *  - The pasted text must contain a line that, after trimming, equals
- *    `[V4+ Styles]` (case-sensitive).
- *  - The next non-blank line after that header must start with
- *    `Format:`.
- *
- * The "Áp dụng" button is disabled until both checks pass; the inline
- * banner explains *why* the button is disabled so the user can fix
- * the input without trial-and-error. On save, the backend swaps the
- * `[V4+ Styles]` section of `<basename>.vietsub.ass` in-place and
- * leaves every other section untouched.
+ * Validates the paste matches the backend's `validate_styles_block`
+ * check: must contain a `[V4+ Styles]` header line and a `Format:`
+ * line right after it. The "Áp dụng" button is disabled until both
+ * checks pass and the inline banner explains why.
  */
 interface PasteStylesModalProps {
   open: boolean
@@ -70,8 +61,6 @@ function validate(input: string): ValidationVerdict {
 const PasteStylesModal: Component<PasteStylesModalProps> = props => {
   const [content, setContent] = createSignal('')
   const [saving, setSaving] = createSignal(false)
-  /** True only after the user has interacted with the textarea — keeps
-   *  the validation banner from screaming on a freshly-opened modal. */
   const [touched, setTouched] = createSignal(false)
 
   createEffect(
@@ -114,7 +103,7 @@ const PasteStylesModal: Component<PasteStylesModalProps> = props => {
   const footer = (
     <>
       <Button
-        variant="secondary"
+        variant="ghost"
         onClick={() => props.onClose()}
         disabled={saving()}
         aria-label="Đóng và hủy bản dán"
@@ -158,8 +147,8 @@ const PasteStylesModal: Component<PasteStylesModalProps> = props => {
       footer={footer}
       maxWidthClass="max-w-3xl"
     >
-      <div class="flex flex-col gap-4">
-        <p class="text-sm text-text">
+      <div class="flex flex-col gap-4 pt-4">
+        <p class="text-sm leading-relaxed text-text">
           Dán nội dung section <code class="font-mono">[V4+ Styles]</code> đã chỉnh sửa từ
           Aegisub/AI. ZimeSub sẽ thay thế đúng section này trong
           <code class="ml-1 font-mono">{targetFilename()}</code> và giữ nguyên các section
@@ -168,7 +157,7 @@ const PasteStylesModal: Component<PasteStylesModalProps> = props => {
 
         <Show when={showError()}>
           <div
-            class="border-2 border-danger bg-bg px-3 py-2 font-mono text-xs text-danger"
+            class="rounded-2xl border border-danger/40 bg-danger-soft px-4 py-3 font-mono text-xs text-danger"
             role="alert"
           >
             {errorMessage()}
@@ -176,7 +165,7 @@ const PasteStylesModal: Component<PasteStylesModalProps> = props => {
         </Show>
 
         <textarea
-          class="block w-full resize-y border-2 border-border bg-bg px-3 py-2 font-mono text-xs leading-relaxed text-text outline-none focus:border-accent"
+          class="block w-full resize-y rounded-2xl border border-border bg-bg px-4 py-3 font-mono text-xs leading-relaxed text-text outline-none focus:border-accent"
           rows={16}
           value={content()}
           onInput={e => {

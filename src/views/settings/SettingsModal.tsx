@@ -13,12 +13,9 @@ import { Minus, Plus, RefreshCw } from 'lucide-solid'
 import { createEffect, createSignal, For, Show, type Component } from 'solid-js'
 
 /**
- * Settings modal — reachable after Onboarding closes via the gear
- * icon in the bottom status bar. Slice 0003 surfaced "Quét lại"
- * + a read-only tool report list; slice 0008 adds a numeric input
- * for `queue_concurrency_extract` (1–8) so the user can tune the
- * tier budget for the JobQueue's extract jobs. Future slices
- * (default render config, UI preferences) layer in on top.
+ * Settings modal — reachable from the gear icon in the bottom status
+ * bar after Onboarding closes. Two sections (tool status + queue
+ * concurrency), each its own rounded surface card.
  */
 interface SettingsModalProps {
   open: boolean
@@ -49,25 +46,29 @@ const SettingsModal: Component<SettingsModalProps> = props => {
       title="Cài đặt"
       ariaLabel="Cài đặt ứng dụng"
       footer={
-        <Button variant="secondary" onClick={() => props.onClose()} aria-label="Đóng">
+        <Button variant="primary" onClick={() => props.onClose()} aria-label="Đóng">
           <span>Đóng</span>
         </Button>
       }
     >
-      <div class="flex flex-col gap-8">
-        <section class="flex flex-col gap-5" aria-label="Trạng thái công cụ">
+      <div class="flex flex-col gap-6 pt-4">
+        <section
+          class="flex flex-col gap-4 rounded-2xl bg-elevated p-5"
+          aria-label="Trạng thái công cụ"
+        >
           <div class="flex items-center justify-between gap-4">
-            <h3 class="font-mono text-xs font-semibold tracking-[0.18em] text-text-muted">
-              CÔNG CỤ ĐÃ DÒ
+            <h3 class="font-mono text-[10px] font-semibold tracking-[0.22em] text-text-muted uppercase">
+              Công cụ đã dò
             </h3>
             <Button
-              variant="primary"
+              variant="secondary"
+              size="sm"
               onClick={handleRescan}
               disabled={toolsStore.phase === 'rescanning'}
               aria-label="Quét lại công cụ"
             >
               <RefreshCw
-                size={18}
+                size={14}
                 strokeWidth={1.5}
                 aria-hidden="true"
                 class={toolsStore.phase === 'rescanning' ? 'animate-spin' : ''}
@@ -78,24 +79,29 @@ const SettingsModal: Component<SettingsModalProps> = props => {
             </Button>
           </div>
 
-          <div class="border-2 border-border bg-bg">
+          <div class="flex flex-col gap-2">
             <For each={toolsStore.reports}>
               {report => <SettingsToolRow report={report} />}
             </For>
             <Show when={toolsStore.reports.length === 0}>
-              <p class="px-4 py-3 text-sm text-text-muted">Chưa có kết quả dò công cụ.</p>
+              <p class="rounded-xl bg-bg px-4 py-3 text-sm text-text-muted">
+                Chưa có kết quả dò công cụ.
+              </p>
             </Show>
           </div>
 
-          <p class="text-xs text-text-muted">
+          <p class="text-xs leading-relaxed text-text-muted">
             Nhấn <span class="font-mono text-text">Quét lại</span> sau khi bạn vừa cài
             hoặc nâng cấp công cụ bên ngoài app.
           </p>
         </section>
 
-        <section class="flex flex-col gap-4" aria-label="Cấu hình hàng đợi">
-          <h3 class="font-mono text-xs font-semibold tracking-[0.18em] text-text-muted">
-            HÀNG ĐỢI
+        <section
+          class="flex flex-col gap-4 rounded-2xl bg-elevated p-5"
+          aria-label="Cấu hình hàng đợi"
+        >
+          <h3 class="font-mono text-[10px] font-semibold tracking-[0.22em] text-text-muted uppercase">
+            Hàng đợi
           </h3>
           <QueueConcurrencyField />
         </section>
@@ -104,19 +110,10 @@ const SettingsModal: Component<SettingsModalProps> = props => {
   )
 }
 
-/**
- * Numeric input + nudge buttons for `queue_concurrency_extract`.
- * Local state mirrors the store value so the user can type freely
- * before committing on blur / +/− click. Out-of-range values are
- * silently clamped by the backend; the local state reflects the
- * post-clamp value the backend returns.
- */
 const QueueConcurrencyField: Component = () => {
   const [draft, setDraft] = createSignal(settingsStore.queueConcurrencyExtract)
   const [pending, setPending] = createSignal(false)
 
-  // Sync local draft whenever the persisted value changes (e.g. on
-  // initial bootstrap or external mutation).
   createEffect(() => {
     setDraft(settingsStore.queueConcurrencyExtract)
   })
@@ -162,61 +159,55 @@ const QueueConcurrencyField: Component = () => {
   const canInc = (): boolean => draft() < MAX_EXTRACT_CONCURRENCY && !pending()
 
   return (
-    <div class="border-2 border-border bg-bg px-4 py-4">
-      <div class="flex items-start justify-between gap-6">
-        <div class="flex min-w-0 flex-1 flex-col gap-1">
-          <label
-            for="queue-concurrency-extract"
-            class="font-mono text-sm font-medium text-text"
-          >
-            Số job extract chạy song song
-          </label>
-          <p class="text-xs text-text-muted">
-            Số lượng job trích xuất sub / audio chạy đồng thời. Render luôn giới hạn ở 1
-            job độc lập. Khoảng hợp lệ: {MIN_EXTRACT_CONCURRENCY}–
-            {MAX_EXTRACT_CONCURRENCY}.
-          </p>
-        </div>
-        <div class="flex flex-none items-center">
-          <button
-            type="button"
-            onClick={() => handleStep(-1)}
-            disabled={!canDec()}
-            class="flex h-11 w-11 items-center justify-center border-2 border-border bg-bg text-text transition-colors hover:border-accent hover:text-accent disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:border-border disabled:hover:text-text"
-            aria-label="Giảm số job extract song song"
-          >
-            <Minus size={18} strokeWidth={1.5} aria-hidden="true" />
-          </button>
-          <input
-            id="queue-concurrency-extract"
-            type="number"
-            min={MIN_EXTRACT_CONCURRENCY}
-            max={MAX_EXTRACT_CONCURRENCY}
-            value={draft()}
-            onInput={handleInput}
-            onBlur={handleBlur}
-            onKeyDown={handleKeyDown}
-            inputmode="numeric"
-            class="h-11 w-16 border-y-2 border-border bg-bg text-center font-mono text-base text-text outline-none focus:border-accent"
-            aria-label="Số job extract song song"
-          />
-          <button
-            type="button"
-            onClick={() => handleStep(1)}
-            disabled={!canInc()}
-            class="flex h-11 w-11 items-center justify-center border-2 border-border bg-bg text-text transition-colors hover:border-accent hover:text-accent disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:border-border disabled:hover:text-text"
-            aria-label="Tăng số job extract song song"
-          >
-            <Plus size={18} strokeWidth={1.5} aria-hidden="true" />
-          </button>
-        </div>
+    <div class="flex flex-col gap-4 rounded-2xl bg-bg p-5 sm:flex-row sm:items-center sm:justify-between sm:gap-6">
+      <div class="flex min-w-0 flex-1 flex-col gap-1">
+        <label for="queue-concurrency-extract" class="text-sm font-medium text-text">
+          Số job extract chạy song song
+        </label>
+        <p class="text-xs leading-relaxed text-text-muted">
+          Render luôn giới hạn ở 1 job độc lập. Khoảng hợp lệ: {MIN_EXTRACT_CONCURRENCY}–
+          {MAX_EXTRACT_CONCURRENCY}.
+        </p>
+      </div>
+      <div class="flex flex-none items-center gap-1 rounded-full border border-border bg-surface p-1">
+        <button
+          type="button"
+          onClick={() => handleStep(-1)}
+          disabled={!canDec()}
+          class="flex h-9 w-9 items-center justify-center rounded-full text-text-muted transition-colors hover:bg-elevated hover:text-accent disabled:cursor-not-allowed disabled:opacity-50"
+          aria-label="Giảm số job extract song song"
+        >
+          <Minus size={16} strokeWidth={1.5} aria-hidden="true" />
+        </button>
+        <input
+          id="queue-concurrency-extract"
+          type="number"
+          min={MIN_EXTRACT_CONCURRENCY}
+          max={MAX_EXTRACT_CONCURRENCY}
+          value={draft()}
+          onInput={handleInput}
+          onBlur={handleBlur}
+          onKeyDown={handleKeyDown}
+          inputmode="numeric"
+          class="h-9 w-12 bg-transparent text-center font-mono text-base text-text outline-none"
+          aria-label="Số job extract song song"
+        />
+        <button
+          type="button"
+          onClick={() => handleStep(1)}
+          disabled={!canInc()}
+          class="flex h-9 w-9 items-center justify-center rounded-full text-text-muted transition-colors hover:bg-elevated hover:text-accent disabled:cursor-not-allowed disabled:opacity-50"
+          aria-label="Tăng số job extract song song"
+        >
+          <Plus size={16} strokeWidth={1.5} aria-hidden="true" />
+        </button>
       </div>
     </div>
   )
 }
 
 const SettingsToolRow: Component<{ report: ToolReport }> = props => (
-  <div class="flex flex-col gap-1 border-b-2 border-border px-4 py-3 last:border-b-0">
+  <div class="flex flex-col gap-1 rounded-xl bg-bg px-4 py-3">
     <div class="flex items-center justify-between gap-3">
       <span class="font-mono text-sm font-medium text-text">{props.report.name}</span>
       <StatusBadge tone={tone[props.report.status]}>
@@ -225,15 +216,17 @@ const SettingsToolRow: Component<{ report: ToolReport }> = props => (
     </div>
     <Show
       when={props.report.resolved_path}
-      fallback={<p class="text-xs text-text-muted">Không có thông tin đường dẫn.</p>}
+      fallback={
+        <p class="text-xs text-text-muted">Không có thông tin đường dẫn.</p>
+      }
     >
-      {p => <p class="font-mono text-xs break-all text-text-muted">{p()}</p>}
+      {p => <p class="font-mono text-[11px] break-all text-text-muted">{p()}</p>}
     </Show>
     <Show when={props.report.detected_version}>
       {v => (
-        <p class="font-mono text-xs text-text-muted">
+        <p class="font-mono text-[11px] text-text-muted">
           Phiên bản: <span class="text-text">v{v()}</span>{' '}
-          <span class="text-text-muted">(tối thiểu {props.report.minimum_version})</span>
+          <span class="text-text-faint">(tối thiểu {props.report.minimum_version})</span>
         </p>
       )}
     </Show>

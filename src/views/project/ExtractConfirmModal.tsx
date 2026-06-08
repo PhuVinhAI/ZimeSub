@@ -3,34 +3,23 @@ import Modal from '@design-system/Modal'
 import { createEffect, createSignal, on, Show, type Component } from 'solid-js'
 
 /**
- * Overwrite-confirm modal for re-extracting an Episode that already
- * has `<basename>.eng.ass` on disk — slice 0007 AC mandates this
- * gate to prevent accidental loss of a previously-edited extract.
+ * Overwrite-confirm modal for re-extracting an Episode whose
+ * `<basename>.eng.ass` already exists on disk.
  *
- * The checkbox ("Không hỏi lại cho Episode này") is session-only
- * (see JobsStore.dontAskOverwrite). Cross-session persistence would
- * be a schema change for a convenience flag; the AC doesn't ask for
- * it, and the cost of asking once per session per Episode is low.
- *
- * Mounted at the ProjectView root with `open={confirmEpisode() !== null}`
- * so a single modal instance handles whichever row currently needs it.
- * `onConfirm(rememberDontAsk)` flips the JobsStore "don't ask" memory
- * when `true` and immediately enqueues; `onCancel` just closes.
+ * The checkbox ("Không hỏi lại cho Episode này") is session-only —
+ * persisting cross-session would require a schema change for a
+ * convenience flag.
  */
 interface ExtractConfirmModalProps {
   open: boolean
   episodeName: string
-  /** User chose "Ghi đè" — `rememberDontAsk` mirrors the checkbox state. */
   onConfirm: (rememberDontAsk: boolean) => void
-  /** User dismissed (Hủy / Escape / backdrop click). */
   onCancel: () => void
 }
 
 const ExtractConfirmModal: Component<ExtractConfirmModalProps> = props => {
   const [dontAsk, setDontAsk] = createSignal(false)
 
-  // Reset the checkbox whenever the modal opens fresh so a previous
-  // "checked" state doesn't bleed across Episode rows.
   createEffect(
     on(
       () => props.open,
@@ -42,7 +31,7 @@ const ExtractConfirmModal: Component<ExtractConfirmModalProps> = props => {
 
   const footer = (
     <>
-      <Button variant="secondary" onClick={() => props.onCancel()}>
+      <Button variant="ghost" onClick={() => props.onCancel()}>
         <span>Hủy</span>
       </Button>
       <Button
@@ -63,21 +52,21 @@ const ExtractConfirmModal: Component<ExtractConfirmModalProps> = props => {
       ariaLabel="Xác nhận ghi đè bản extract"
       footer={footer}
     >
-      <div class="flex flex-col gap-5">
-        <p class="text-sm text-text">
+      <div class="flex flex-col gap-5 pt-4">
+        <p class="text-sm leading-relaxed text-text">
           Episode này đã có sẵn file <code class="font-mono">.eng.ass</code> trên đĩa.
           Tiếp tục sẽ ghi đè bản extract hiện có — mọi chỉnh sửa thủ công trên file này sẽ
           mất.
         </p>
         <Show when={props.episodeName.length > 0}>
-          <p class="break-all border-2 border-border bg-bg px-3 py-2 font-mono text-xs text-text-muted">
+          <p class="rounded-2xl border border-border bg-bg px-4 py-3 font-mono text-xs break-all text-text-muted">
             {props.episodeName}
           </p>
         </Show>
-        <label class="flex cursor-pointer items-center gap-2 text-sm text-text">
+        <label class="flex cursor-pointer items-center gap-2.5 text-sm text-text">
           <input
             type="checkbox"
-            class="h-4 w-4 cursor-pointer accent-accent"
+            class="h-4 w-4 cursor-pointer rounded accent-accent"
             checked={dontAsk()}
             onInput={e => setDontAsk(e.currentTarget.checked)}
             aria-label="Không hỏi lại cho Episode này"

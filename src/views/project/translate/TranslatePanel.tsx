@@ -20,19 +20,11 @@ interface TranslatePanelProps {
 }
 
 /**
- * Per-Episode Translate-stage helper strip — slice 0010.
+ * Per-Episode Translate stage panel — Rounded Flat refresh.
  *
- * Renders four buttons (open folder, make draft, paste translation,
- * paste styles) plus the yellow "Render lỗi thời" badge when the
- * derived `is_render_stale` flag is set. The whole strip is mounted
- * inside the Episode row by `ProjectView` and only visible when
- * `hasExtractedSub` is true — the gating happens at the caller so a
- * non-Extracted Episode collapses the strip entirely (per AC).
- *
- * Translation itself happens outside ZimeSub (ChatGPT / Gemini); this
- * component only owns the file-system plumbing. The three modals
- * (draft overwrite confirm, paste translation, paste V4+ Styles) live
- * in sibling files for layout clarity.
+ * The original `border-t-2` divider is replaced by an own rounded
+ * surface card so the translate cluster reads as a distinct step in
+ * the per-Episode wizard without resorting to single-side borders.
  */
 const TranslatePanel: Component<TranslatePanelProps> = props => {
   const [draftConfirmOpen, setDraftConfirmOpen] = createSignal(false)
@@ -90,11 +82,11 @@ const TranslatePanel: Component<TranslatePanelProps> = props => {
 
   return (
     <div
-      class="mt-3 flex flex-col gap-2 border-t-2 border-border pt-3"
+      class="flex flex-col gap-4 rounded-2xl border border-border bg-surface p-5"
       aria-label="Khu vực dịch thuật"
     >
       <div class="flex items-center justify-between gap-3">
-        <span class="font-mono text-[10px] font-semibold tracking-[0.2em] text-text-muted uppercase">
+        <span class="font-mono text-[10px] font-semibold tracking-[0.22em] text-text-muted uppercase">
           Dịch thuật
         </span>
         <Show when={isRenderStale()}>
@@ -104,36 +96,40 @@ const TranslatePanel: Component<TranslatePanelProps> = props => {
       <div class="flex flex-wrap items-center gap-2">
         <Button
           variant="secondary"
+          size="sm"
           onClick={() => void handleOpenFolder()}
           aria-label="Mở EpisodeFolder trong Windows Explorer"
         >
-          <FolderOpen size={16} strokeWidth={1.5} aria-hidden="true" />
+          <FolderOpen size={14} strokeWidth={1.5} aria-hidden="true" />
           <span>Mở thư mục</span>
         </Button>
         <Button
           variant="secondary"
+          size="sm"
           onClick={() => void handleMakeDraft()}
           aria-label="Tạo file .ass.txt từ .eng.ass"
         >
-          <FileText size={16} strokeWidth={1.5} aria-hidden="true" />
-          <span>Tạo file .ass.txt</span>
+          <FileText size={14} strokeWidth={1.5} aria-hidden="true" />
+          <span>Tạo .ass.txt</span>
         </Button>
         <Button
           variant="secondary"
+          size="sm"
           onClick={() => setPasteTranslationOpen(true)}
           aria-label="Dán bản dịch tiếng Việt"
         >
-          <ClipboardPaste size={16} strokeWidth={1.5} aria-hidden="true" />
+          <ClipboardPaste size={14} strokeWidth={1.5} aria-hidden="true" />
           <span>Dán bản dịch</span>
         </Button>
         <Button
           variant="secondary"
+          size="sm"
           onClick={() => setPasteStylesOpen(true)}
           disabled={!hasTranslated()}
           title={hasTranslated() ? undefined : 'Cần có bản dịch trước'}
           aria-label="Dán section [V4+ Styles] để patch"
         >
-          <Palette size={16} strokeWidth={1.5} aria-hidden="true" />
+          <Palette size={14} strokeWidth={1.5} aria-hidden="true" />
           <span>Dán [V4+ Styles]</span>
         </Button>
       </div>

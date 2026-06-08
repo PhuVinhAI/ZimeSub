@@ -5,15 +5,13 @@ import { For, type Component, type JSX } from 'solid-js'
 /**
  * Top-right transient toast stack rendered by `AppShell`.
  *
- * Subscribes to the global `toastStore` — there is no prop interface
- * because every page can push without prop-drilling. Each card has a
- * 2 px tone-coloured border (matches `StatusBadge` tones), an icon, the
- * message, and a manual dismiss button. Auto-dismiss is handled by the
- * store; the X button calls `dismissToast(id)` for impatient users.
+ * Subscribes to the global `toastStore` so any page can push without
+ * prop-drilling. Each card is a fully-rounded pill with a tonal
+ * background tint (matching `StatusBadge.solid`) — no border-only
+ * outlines per the rounded-flat refresh.
  *
- * `aria-live="assertive"` so screen readers announce errors immediately
- * — toasts in this app are reserved for the user's own actions ("file
- * rejected", "duplicate"), not background events.
+ * `aria-live="assertive"` so screen readers announce errors
+ * immediately — toasts are reserved for user-triggered events.
  */
 const ToastStack: Component = () => {
   return (
@@ -43,9 +41,9 @@ interface ToastCardProps {
 }
 
 const toneClasses: Record<ToastTone, string> = {
-  accent: 'border-accent text-accent',
-  warn: 'border-warn text-warn',
-  danger: 'border-danger text-danger'
+  accent: 'bg-accent-soft text-accent',
+  warn: 'bg-warn-soft text-warn',
+  danger: 'bg-danger-soft text-danger'
 }
 
 const ToastIcon: Record<ToastTone, () => JSX.Element> = {
@@ -59,16 +57,22 @@ const ToastCard: Component<ToastCardProps> = props => {
     <div
       role="status"
       class={[
-        'pointer-events-auto flex max-w-md min-w-[260px] items-start gap-3 border-2 bg-surface px-4 py-3 text-sm',
-        toneClasses[props.tone]
+        'pointer-events-auto flex max-w-md min-w-[280px] items-start gap-3 rounded-2xl border border-border bg-elevated px-5 py-4 text-sm'
       ].join(' ')}
     >
-      <span class="mt-0.5 flex-none">{ToastIcon[props.tone]()}</span>
+      <span
+        class={[
+          'mt-0.5 flex h-7 w-7 flex-none items-center justify-center rounded-full',
+          toneClasses[props.tone]
+        ].join(' ')}
+      >
+        {ToastIcon[props.tone]()}
+      </span>
       <p class="flex-1 break-words text-text">{props.message}</p>
       <button
         type="button"
         onClick={() => props.onDismiss()}
-        class="-mr-1 flex h-7 w-7 flex-none items-center justify-center border-2 border-transparent text-text-muted transition-colors hover:border-border hover:text-text"
+        class="-mr-1 flex h-7 w-7 flex-none items-center justify-center rounded-full border border-transparent text-text-muted transition-colors hover:bg-surface hover:text-text"
         aria-label="Đóng thông báo"
       >
         <X size={14} strokeWidth={1.5} aria-hidden="true" />

@@ -1,21 +1,14 @@
 import type { Component } from 'solid-js'
 
 /**
- * Flat determinate progress bar used by Episode rows during extract /
- * render jobs.
+ * Rounded determinate progress bar used during extract / render jobs.
  *
- * Style follows the pure flat dark guide — 2 px border track, accent
- * fill, no rounded corners or gradient. Track height is 8 px which
- * sits comfortably inside the 56 px Episode row without crowding the
- * adjacent badges. The accent fill width is driven by the `ratio`
- * prop clamped to `[0, 1]`; values outside that range are bounded
- * defensively (a parser bug shouldn't paint the bar past 100% or as
- * a sliver of negative width).
+ * Track is a 6px pill — full radius makes the fill bar feel like a
+ * "liquid" capsule even at 1% progress. No gradient or shadow; pure
+ * accent colour on the elevated surface tone.
  *
- * `ariaLabel` is required so screen readers can announce the running
- * job; `ariaValueText` falls back to the percentage if not provided
- * (Jobs panel uses the richer ffmpeg `time= / total` string in a
- * later slice).
+ * `ratio` is clamped to `[0, 1]` defensively so a parser bug never
+ * paints the bar past 100% or as negative width.
  */
 interface ProgressBarProps {
   /** Fraction in `[0, 1]`. Clamped before rendering. */
@@ -32,7 +25,7 @@ const ProgressBar: Component<ProgressBarProps> = props => {
 
   return (
     <div
-      class="h-2 w-full border-2 border-border bg-bg"
+      class="h-1.5 w-full overflow-hidden rounded-full bg-elevated"
       role="progressbar"
       aria-valuemin={0}
       aria-valuemax={100}
@@ -41,7 +34,7 @@ const ProgressBar: Component<ProgressBarProps> = props => {
       aria-label={props.ariaLabel}
     >
       <div
-        class="h-full bg-accent transition-[width] duration-150 ease-out"
+        class="h-full rounded-full bg-accent transition-[width] duration-150 ease-out"
         style={{ width: `${percent()}%` }}
       />
     </div>

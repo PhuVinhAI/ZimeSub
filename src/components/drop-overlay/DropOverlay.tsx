@@ -4,24 +4,20 @@ import { createEffect, onCleanup, Show, type Component } from 'solid-js'
 
 /**
  * Full-window overlay shown while the user drags files into the app
- * window with a Project open (slice 0005).
+ * window with a Project open.
  *
- * Spec from docs/style-guide.md § "Drag & drop":
- *   semi-opaque `bg` at 0.92 alpha + 3 px dashed `accent` border inset
- *   24 px + a large centered Vietnamese label.
+ * The Rounded Flat refresh keeps the dashed-border affordance from the
+ * original style guide (it reads as "drop target" instantly) but
+ * rounds the corners and centres a soft card with the call-to-action
+ * so the overlay matches the rest of the inset shell language.
  *
  * Visibility is driven entirely by `props.visible`, which AppShell
- * derives from the `getCurrentWebview().onDragDropEvent` callback —
- * `enter`/`over` flip it to true, `leave`/`drop` flip it to false. Esc
- * is handled here via the global modal stack so it integrates with the
- * existing `closeTopModal` shortcut: while visible, this component
- * registers an entry that closes the overlay; when the user presses
- * Esc, the same code path that closes a modal also closes this overlay.
+ * derives from `getCurrentWebview().onDragDropEvent`. Esc is wired
+ * through the modal stack so it integrates with the existing
+ * `closeTopModal` shortcut.
  *
  * `pointer-events-none` keeps the overlay non-interactive — the OS
- * still owns the drag operation, so we never want to consume the drop
- * event ourselves. Esc dismissal goes through the keyboard registry,
- * not a click.
+ * still owns the drag operation.
  */
 interface DropOverlayProps {
   visible: boolean
@@ -29,11 +25,6 @@ interface DropOverlayProps {
 }
 
 const DropOverlay: Component<DropOverlayProps> = props => {
-  // While visible, push a closer onto the modal stack so the global
-  // Escape shortcut (installed in `globalShortcuts.ts`) can dismiss the
-  // overlay without us having to register a parallel Escape binding
-  // (the registry's "latest registration wins" rule would otherwise
-  // shadow modal Escape handlers — see modalStack docs).
   createEffect(() => {
     if (!props.visible) return
     const id = pushModal(() => props.onDismiss())
@@ -49,22 +40,21 @@ const DropOverlay: Component<DropOverlayProps> = props => {
         aria-label="Đang kéo file vào cửa sổ"
       >
         <div
-          class="absolute border-[3px] border-dashed border-accent"
-          style={{
-            top: '24px',
-            right: '24px',
-            bottom: '24px',
-            left: '24px'
-          }}
+          class="absolute inset-6 rounded-[40px] border-2 border-dashed border-accent"
           aria-hidden="true"
         />
-        <div class="relative flex flex-col items-center gap-6 px-12 text-center">
-          <FilePlus2 size={64} strokeWidth={1.5} class="text-accent" aria-hidden="true" />
+        <div class="relative flex flex-col items-center gap-6 rounded-[32px] border border-border bg-surface px-12 py-10 text-center">
+          <span
+            class="flex h-20 w-20 items-center justify-center rounded-3xl bg-accent text-accent-on-accent"
+            aria-hidden="true"
+          >
+            <FilePlus2 size={36} strokeWidth={1.5} />
+          </span>
           <p class="text-3xl font-semibold tracking-tight text-text">
-            Thả file MKV vào đây để thêm Episode
+            Thả file MKV vào đây
           </p>
-          <p class="font-mono text-xs tracking-[0.18em] text-text-muted">
-            CHỈ CHẤP NHẬN .MKV · NHẤN ESC ĐỂ HỦY
+          <p class="font-mono text-[11px] tracking-[0.22em] text-text-muted uppercase">
+            Chỉ chấp nhận .mkv · Nhấn Esc để hủy
           </p>
         </div>
       </div>
