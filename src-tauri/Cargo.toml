@@ -26,11 +26,13 @@ serde_json = "1.0.150"
 serde = { version = "1.0.228", features = ["derive"] }
 tauri = { version = "2.11.2", features = [] }
 tauri-plugin-devtools = "2.1.0"
+tauri-plugin-opener = "2"
 which = "8.0.3"
 dirs = "6.0.0"
 tracing = "0.1.44"
 chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
 tracing-subscriber = { version = "0.3.23", default-features = false, features = ["fmt", "env-filter"] }
+tokio = { version = "1", features = ["process", "io-util", "macros", "sync", "rt"] }
 
 [features]
 default = [ "custom-protocol" ]

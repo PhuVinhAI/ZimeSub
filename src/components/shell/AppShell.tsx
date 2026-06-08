@@ -4,8 +4,9 @@ import StatusBar from '@components/shell/StatusBar'
 import { installGlobalShortcuts } from '@lib/keyboard/globalShortcuts'
 import { allReady, bootstrapTools, toolsStore } from '@stores/tools'
 import OnboardingView from '@views/onboarding/OnboardingView'
+import SettingsModal from '@views/settings/SettingsModal'
 import { Loader2 } from 'lucide-solid'
-import { Match, Switch, onCleanup, onMount, type Component } from 'solid-js'
+import { createSignal, Match, onCleanup, onMount, Switch, type Component } from 'solid-js'
 
 /**
  * Root layout shell.
@@ -15,15 +16,19 @@ import { Match, Switch, onCleanup, onMount, type Component } from 'solid-js'
  *     so the Onboarding panel never flashes in front of stale empty state.
  *  2. Onboarding gate — full-window view when any `RequiredTool` is
  *     `Missing` or `Outdated`. Sidebar, drag-drop, and the bottom status
- *     bar are *not* rendered (per slice 0002 acceptance criteria).
+ *     bar are *not* rendered (per slice 0002 acceptance criteria); install
+ *     buttons + live log panel land here (slice 0003).
  *  3. Normal three-region shell (Sidebar / Main / StatusBar) from
- *     slice 0001, shown once all three tools report `Ready`.
+ *     slice 0001, shown once all three tools report `Ready`. The Settings
+ *     modal (slice 0003 entry point for the "Quét lại" re-probe) is mounted
+ *     here too; trigger lives on the StatusBar gear icon.
  *
- * Global keyboard shortcuts boot regardless of gate state — Escape still
- * works to close any modal that might appear during Onboarding (none today,
- * but the modal stack is shared infrastructure).
+ * Global keyboard shortcuts boot regardless of gate state — Escape closes
+ * any modal that registers itself in `modalStack`.
  */
 const AppShell: Component = () => {
+  const [settingsOpen, setSettingsOpen] = createSignal(false)
+
   onMount(() => {
     const dispose = installGlobalShortcuts()
     onCleanup(dispose)
@@ -48,7 +53,8 @@ const AppShell: Component = () => {
               <EmptyProjectsState />
             </main>
           </div>
-          <StatusBar />
+          <StatusBar onOpenSettings={() => setSettingsOpen(true)} />
+          <SettingsModal open={settingsOpen()} onClose={() => setSettingsOpen(false)} />
         </Match>
       </Switch>
     </div>

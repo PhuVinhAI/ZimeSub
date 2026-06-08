@@ -1,26 +1,30 @@
-//! Thin Tauri command surface for slice 0002.
+//! Thin Tauri command surface.
 //!
-//! All real logic lives in `tooling` and `settings_store`; commands only:
+//! All real logic lives in `tooling`, `settings_store`, and `install`;
+//! commands only:
 //!  1. lock shared state,
 //!  2. delegate,
-//!  3. persist `settings.json`,
+//!  3. persist `settings.json` when relevant,
 //!  4. translate `Result<_, Error>` into the `Result<_, String>` shape Tauri
 //!     serialises across the IPC boundary.
 //!
-//! The frontend (`src/api/tooling.ts`) mirrors the names and shapes here.
+//! The frontend mirrors the names and shapes here in `src/api/`.
 
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
-use tauri::State;
+use tauri::{AppHandle, State};
 use tracing::error;
 
+use crate::install::{self, InstallRegistry};
 use crate::settings_store::{self, Settings};
-use crate::tooling::{self, ToolReport};
+use crate::tooling::{self, RequiredTool, ToolReport};
 
-/// State managed by Tauri — single source of truth for the in-memory copy
-/// of `settings.json`. All command handlers go through this mutex.
+/// State managed by Tauri — owns the in-memory copy of `settings.json` and
+/// the registry of in-flight winget installs. All command handlers route
+/// through this struct.
 pub struct AppState {
     settings: Mutex<Settings>,
+    installs: Arc<InstallRegistry>,
 }
 
 impl AppState {
@@ -31,6 +35,7 @@ impl AppState {
         });
         Self {
             settings: Mutex::new(settings),
+            installs: Arc::new(InstallRegistry::new()),
         }
     }
 }
@@ -43,10 +48,48 @@ pub fn tool_probe(state: State<'_, AppState>) -> Result<Vec<ToolReport>, String>
 }
 
 /// Full re-detect ignoring cache — wired to the Onboarding "Quét lại"
-/// button. Persists the fresh results.
+/// button and the Settings re-check action. Persists the fresh results.
 #[tauri::command]
 pub fn tool_rescan(state: State<'_, AppState>) -> Result<Vec<ToolReport>, String> {
     run_probe(state, ProbeMode::Fresh)
+}
+
+/// Probe whether `winget` itself is on PATH. Drives the Onboarding fallback
+/// (Win 10 pre-1809 / locked-down enterprise machines get the manual
+/// download buttons instead of the install button).
+#[tauri::command]
+pub fn winget_available() -> bool {
+    install::winget_available()
+}
+
+/// Kick off a winget install for the given `RequiredTool`. Returns as soon
+/// as the child process is spawned; progress and completion are reported
+/// via the `tool-install-log` and `tool-install-done` events.
+///
+/// `install_id` is supplied by the frontend so it can correlate log/done
+/// events with the originating click — useful when the user fires multiple
+/// installs in sequence.
+#[tauri::command]
+pub async fn tool_install_start(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    install_id: String,
+    tool: RequiredTool,
+) -> Result<(), String> {
+    let registry = state.installs.clone();
+    install::start_install(app, registry, install_id, tool)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Cancel a running install — kills the winget child process and surfaces
+/// the resulting `done` event with `cancelled: true`.
+#[tauri::command]
+pub fn tool_install_cancel(
+    state: State<'_, AppState>,
+    install_id: String,
+) -> Result<(), String> {
+    install::cancel_install(state.installs.as_ref(), &install_id)
 }
 
 enum ProbeMode {

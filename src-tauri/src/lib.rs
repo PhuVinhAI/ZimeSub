@@ -1,4 +1,5 @@
 mod commands;
+mod install;
 mod logging;
 mod paths;
 mod settings_store;
@@ -27,10 +28,14 @@ pub fn run() {
     }
 
     builder
+        .plugin(tauri_plugin_opener::init())
         .manage(commands::AppState::new())
         .invoke_handler(tauri::generate_handler![
             commands::tool_probe,
             commands::tool_rescan,
+            commands::winget_available,
+            commands::tool_install_start,
+            commands::tool_install_cancel,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

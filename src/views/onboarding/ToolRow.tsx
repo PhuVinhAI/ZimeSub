@@ -1,5 +1,16 @@
+import { openUrl } from '@api/opener'
+import type { ToolName, ToolReport, ToolStatus } from '@api/tooling'
+import Button from '@design-system/Button'
 import StatusBadge, { type BadgeTone } from '@design-system/StatusBadge'
-import type { ToolReport, ToolStatus } from '@api/tooling'
+import {
+  cancelInstall,
+  isInstallingTool,
+  isLastInstallForTool,
+  manualReprobe,
+  startInstall,
+  toolsStore
+} from '@stores/tools'
+import { Download, ExternalLink, RefreshCw, X } from 'lucide-solid'
 import type { Component } from 'solid-js'
 import { Match, Show, Switch } from 'solid-js'
 
@@ -10,10 +21,13 @@ import { Match, Show, Switch } from 'solid-js'
  *   ┌─────────────────────────────────────────────────────────────┐
  *   │ mkvmerge                              [Sẵn sàng]  v84.0     │
  *   │ C:\Program Files\MKVToolNix\mkvmerge.exe                    │
+ *   │                              [Cài đặt] / [Hủy] / [Thử lại]  │
  *   └─────────────────────────────────────────────────────────────┘
  *
  * For `Outdated` we surface "current vs minimum" on a second line; for
- * `Missing` we explain where we looked.
+ * `Missing` we explain where we looked. When the tool is not `Ready` and
+ * `winget` is available, an install button is shown; when winget is missing
+ * we fall back to "Mở trang tải" + "Tôi đã cài" per the AC.
  */
 interface ToolRowProps {
   report: ToolReport
@@ -31,9 +45,45 @@ const badgeLabel: Record<ToolStatus, string> = {
   Missing: 'Chưa cài'
 }
 
+/**
+ * Official download pages used by the winget-unavailable fallback. URLs
+ * picked to match the same upstream sources as the winget packages — so a
+ * user who installs manually ends up with the same MKVToolNix /
+ * Gyan.FFmpeg builds they would have gotten via winget.
+ */
+const downloadUrl: Record<ToolName, string> = {
+  mkvmerge: 'https://mkvtoolnix.download/downloads.html#windows',
+  mkvextract: 'https://mkvtoolnix.download/downloads.html#windows',
+  ffmpeg: 'https://www.gyan.dev/ffmpeg/builds/'
+}
+
 const ToolRow: Component<ToolRowProps> = props => {
+  const isNotReady = (): boolean => props.report.status !== 'Ready'
+  const installingThis = (): boolean => isInstallingTool(props.report.name)
+  const anyInstallRunning = (): boolean => toolsStore.install.phase === 'running'
+
+  const handleInstall = (): void => {
+    void startInstall(props.report.name)
+  }
+
+  const handleCancel = (): void => {
+    void cancelInstall()
+  }
+
+  const handleRetry = (): void => {
+    void startInstall(props.report.name)
+  }
+
+  const handleOpenDownload = (): void => {
+    void openUrl(downloadUrl[props.report.name])
+  }
+
+  const handleManualReprobe = (): void => {
+    void manualReprobe()
+  }
+
   return (
-    <div class="flex flex-col gap-2 border-b-2 border-border px-6 py-5 last:border-b-0">
+    <div class="flex flex-col gap-3 border-b-2 border-border px-6 py-5 last:border-b-0">
       <div class="flex items-center justify-between gap-4">
         <div class="flex items-baseline gap-3">
           <span class="font-mono text-base font-medium text-text">{props.report.name}</span>
@@ -71,8 +121,114 @@ const ToolRow: Component<ToolRowProps> = props => {
           </p>
         </Match>
       </Switch>
+
+      <Show when={isNotReady()}>
+        <div class="flex flex-wrap items-center gap-3">
+          <Switch>
+            <Match when={toolsStore.wingetAvailable === true}>
+              <Show
+                when={installingThis()}
+                fallback={
+                  <ReadyToInstallActions
+                    disabled={anyInstallRunning()}
+                    onInstall={handleInstall}
+                    lastFailed={
+                      isLastInstallForTool(props.report.name) &&
+                      (toolsStore.install.phase === 'failed' ||
+                        toolsStore.install.phase === 'cancelled')
+                    }
+                    onRetry={handleRetry}
+                  />
+                }
+              >
+                <InstallingActions onCancel={handleCancel} />
+              </Show>
+            </Match>
+
+            <Match when={toolsStore.wingetAvailable === false}>
+              <ManualFallbackActions
+                onOpen={handleOpenDownload}
+                onReprobe={handleManualReprobe}
+                reprobing={toolsStore.phase === 'rescanning'}
+              />
+            </Match>
+          </Switch>
+        </div>
+      </Show>
     </div>
   )
 }
+
+const ReadyToInstallActions: Component<{
+  disabled: boolean
+  onInstall: () => void
+  lastFailed: boolean
+  onRetry: () => void
+}> = props => (
+  <Show
+    when={props.lastFailed}
+    fallback={
+      <Button
+        variant="primary"
+        onClick={props.onInstall}
+        disabled={props.disabled}
+        aria-label="Cài đặt qua winget"
+      >
+        <Download size={18} strokeWidth={1.5} aria-hidden="true" />
+        <span>Cài đặt</span>
+      </Button>
+    }
+  >
+    <Button
+      variant="primary"
+      onClick={props.onRetry}
+      disabled={props.disabled}
+      aria-label="Thử cài đặt lại"
+    >
+      <RefreshCw size={18} strokeWidth={1.5} aria-hidden="true" />
+      <span>Thử lại</span>
+    </Button>
+  </Show>
+)
+
+const InstallingActions: Component<{ onCancel: () => void }> = props => (
+  <>
+    <Button variant="secondary" disabled aria-label="Đang cài đặt">
+      <RefreshCw size={18} strokeWidth={1.5} aria-hidden="true" class="animate-spin" />
+      <span>Đang cài...</span>
+    </Button>
+    <Button variant="secondary" onClick={props.onCancel} aria-label="Hủy cài đặt">
+      <X size={18} strokeWidth={1.5} aria-hidden="true" />
+      <span>Hủy</span>
+    </Button>
+  </>
+)
+
+const ManualFallbackActions: Component<{
+  onOpen: () => void
+  onReprobe: () => void
+  reprobing: boolean
+}> = props => (
+  <>
+    <Button variant="primary" onClick={props.onOpen} aria-label="Mở trang tải">
+      <ExternalLink size={18} strokeWidth={1.5} aria-hidden="true" />
+      <span>Mở trang tải</span>
+    </Button>
+    <Button
+      variant="secondary"
+      onClick={props.onReprobe}
+      disabled={props.reprobing}
+      aria-label="Tôi đã cài"
+    >
+      <RefreshCw
+        size={18}
+        strokeWidth={1.5}
+        aria-hidden="true"
+        class={props.reprobing ? 'animate-spin' : ''}
+      />
+      <span>{props.reprobing ? 'Đang quét...' : 'Tôi đã cài'}</span>
+    </Button>
+  </>
+)
 
 export default ToolRow
