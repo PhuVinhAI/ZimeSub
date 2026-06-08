@@ -41,9 +41,16 @@ use tracing::{info, warn};
 /// All four fields are present in the wire shape from slice 0007
 /// onward; only `has_extracted_sub` is computed and used today —
 /// the others always return `false` until their owning slices land.
+///
+/// Slice 0009 wires `has_extracted_audio`. Per PRD, the audio
+/// artefact is decorative — the EpisodeState progression does not
+/// depend on it, so the row badge derivation keeps using
+/// `has_extracted_sub` / `has_translated_sub` / `has_render`. The new
+/// flag drives a small companion "audio" indicator badge.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct EpisodeArtifacts {
     pub has_extracted_sub: bool,
+    pub has_extracted_audio: bool,
     pub has_translation_draft: bool,
     pub has_translated_sub: bool,
     pub has_render: bool,
@@ -55,15 +62,25 @@ pub struct EpisodeArtifacts {
 /// drives the artefact filename prefix: `<basename>.eng.ass` for the
 /// extracted subtitle, etc.
 ///
-/// Slice 0007 implements only the extracted-subtitle check; the
-/// other three return `false` until their owning slices ship and
-/// hook into the same function. Keeping the shape stable from the
-/// start means the frontend / JobsStore code paths that read this
-/// struct don't need a follow-up rewrite.
-pub fn inspect_artifacts(episode_folder: &Path, basename: &str) -> EpisodeArtifacts {
+/// Slice 0009 added `audio_extension` so the audio check can match
+/// the codec the project is configured for (`mp3` / `aac` / `flac`).
+/// Passing `None` keeps the audio flag `false` — handy for the
+/// pre-slice-0009 callers that don't carry a codec yet.
+pub fn inspect_artifacts(
+    episode_folder: &Path,
+    basename: &str,
+    audio_extension: Option<&str>,
+) -> EpisodeArtifacts {
     let extracted_sub = episode_folder.join(format!("{basename}.eng.ass"));
+    let has_extracted_audio = audio_extension
+        .map(|ext| {
+            let candidate = episode_folder.join(format!("{basename}.{ext}"));
+            candidate.is_file()
+        })
+        .unwrap_or(false);
     EpisodeArtifacts {
         has_extracted_sub: extracted_sub.is_file(),
+        has_extracted_audio,
         has_translation_draft: false,
         has_translated_sub: false,
         has_render: false,
@@ -71,9 +88,11 @@ pub fn inspect_artifacts(episode_folder: &Path, basename: &str) -> EpisodeArtifa
 }
 
 /// Crash-recovery scan for one EpisodeFolder. Walks the folder
-/// (non-recursive) and deletes any `.mp4` / `.ass` whose size is 0
-/// bytes — the AC's v1 heuristic for "this file is a partial output
-/// from a job that died before it could flush anything". Returns the
+/// (non-recursive) and deletes any `.mp4` / `.ass` / `.mp3` / `.aac`
+/// / `.flac` whose size is 0 bytes — the AC's v1 heuristic for "this
+/// file is a partial output from a job that died before it could
+/// flush anything". Slice 0009 extends the original mp4/ass set with
+/// the three audio extensions ExtractAudio writes to. Returns the
 /// list of deleted paths so the caller can log them.
 ///
 /// Silent on a missing or unreadable folder so a project whose
@@ -86,6 +105,7 @@ pub fn inspect_artifacts(episode_folder: &Path, basename: &str) -> EpisodeArtifa
 /// touched. Each deletion is logged at `info` so a forensic readback
 /// of the app log shows which artefacts were considered stale.
 pub fn clean_stale_artifacts(episode_folder: &Path) -> Vec<PathBuf> {
+    const STALE_EXTENSIONS: &[&str] = &[".mp4", ".ass", ".mp3", ".aac", ".flac"];
     let mut deleted: Vec<PathBuf> = Vec::new();
     if !episode_folder.is_dir() {
         return deleted;
@@ -110,7 +130,7 @@ pub fn clean_stale_artifacts(episode_folder: &Path) -> Vec<PathBuf> {
             continue;
         };
         let lower = name.to_ascii_lowercase();
-        if !(lower.ends_with(".mp4") || lower.ends_with(".ass")) {
+        if !STALE_EXTENSIONS.iter().any(|ext| lower.ends_with(ext)) {
             continue;
         }
         let len = match fs::metadata(&path) {
@@ -162,8 +182,9 @@ mod tests {
     #[test]
     fn empty_folder_reports_no_artifacts() {
         let dir = temp_dir_for_test("empty");
-        let artifacts = inspect_artifacts(&dir, "show-01");
+        let artifacts = inspect_artifacts(&dir, "show-01", Some("mp3"));
         assert!(!artifacts.has_extracted_sub);
+        assert!(!artifacts.has_extracted_audio);
         assert!(!artifacts.has_translation_draft);
         assert!(!artifacts.has_translated_sub);
         assert!(!artifacts.has_render);
@@ -175,12 +196,50 @@ mod tests {
         let dir = temp_dir_for_test("has-ass");
         let basename = "show-01";
         fs::write(dir.join(format!("{basename}.eng.ass")), b"[Script Info]\n").expect("write");
-        let artifacts = inspect_artifacts(&dir, basename);
+        let artifacts = inspect_artifacts(&dir, basename, Some("mp3"));
         assert!(artifacts.has_extracted_sub);
         // The other slice-7-out-of-scope flags stay false.
+        assert!(!artifacts.has_extracted_audio);
         assert!(!artifacts.has_translation_draft);
         assert!(!artifacts.has_translated_sub);
         assert!(!artifacts.has_render);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn presence_of_audio_file_flips_has_extracted_audio() {
+        let dir = temp_dir_for_test("has-audio");
+        let basename = "show-01";
+        fs::write(dir.join(format!("{basename}.mp3")), b"binary").expect("write");
+        let artifacts = inspect_artifacts(&dir, basename, Some("mp3"));
+        assert!(artifacts.has_extracted_audio);
+        assert!(!artifacts.has_extracted_sub);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn audio_check_matches_configured_extension_only() {
+        let dir = temp_dir_for_test("audio-ext");
+        let basename = "show-01";
+        // Project is configured for `mp3`; an existing `.aac` doesn't
+        // flip the flag because that's the wrong codec for this
+        // project's audio default.
+        fs::write(dir.join(format!("{basename}.aac")), b"binary").expect("write");
+        let artifacts = inspect_artifacts(&dir, basename, Some("mp3"));
+        assert!(!artifacts.has_extracted_audio);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn audio_check_skipped_when_extension_is_none() {
+        let dir = temp_dir_for_test("audio-none");
+        let basename = "show-01";
+        fs::write(dir.join(format!("{basename}.mp3")), b"binary").expect("write");
+        // Caller didn't supply a codec → audio flag stays false even
+        // when the file exists. Used by pre-slice-0009 callers and the
+        // test isolation here.
+        let artifacts = inspect_artifacts(&dir, basename, None);
+        assert!(!artifacts.has_extracted_audio);
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -192,7 +251,7 @@ mod tests {
         let dir = temp_dir_for_test("dir-not-file");
         let basename = "show-02";
         fs::create_dir(dir.join(format!("{basename}.eng.ass"))).expect("mkdir");
-        let artifacts = inspect_artifacts(&dir, basename);
+        let artifacts = inspect_artifacts(&dir, basename, Some("mp3"));
         assert!(!artifacts.has_extracted_sub);
         let _ = fs::remove_dir_all(&dir);
     }
@@ -204,7 +263,7 @@ mod tests {
         // two MKVs in the same Project share a folder (PRD edge case).
         let dir = temp_dir_for_test("basename-exact");
         fs::write(dir.join("other-show.eng.ass"), b"[Script Info]\n").expect("write");
-        let artifacts = inspect_artifacts(&dir, "this-show");
+        let artifacts = inspect_artifacts(&dir, "this-show", Some("mp3"));
         assert!(!artifacts.has_extracted_sub);
         let _ = fs::remove_dir_all(&dir);
     }
@@ -217,28 +276,36 @@ mod tests {
         let dir = temp_dir_for_test("real-basename");
         let basename = "[Erai-raws] Oi Tonbo - 01 [1080p][HEVC][1E1E044E]";
         fs::write(dir.join(format!("{basename}.eng.ass")), b"x").expect("write");
-        let artifacts = inspect_artifacts(&dir, basename);
+        let artifacts = inspect_artifacts(&dir, basename, Some("mp3"));
         assert!(artifacts.has_extracted_sub);
         let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn clean_stale_artifacts_removes_zero_byte_mp4_and_ass() {
+    fn clean_stale_artifacts_removes_zero_byte_mp4_ass_and_audio() {
         let dir = temp_dir_for_test("stale");
         fs::write(dir.join("ep.VietSub.mp4"), b"").expect("write empty mp4");
         fs::write(dir.join("ep.eng.ass"), b"").expect("write empty ass");
+        fs::write(dir.join("ep.mp3"), b"").expect("write empty mp3");
+        fs::write(dir.join("ep.aac"), b"").expect("write empty aac");
+        fs::write(dir.join("ep.flac"), b"").expect("write empty flac");
         // Real outputs survive — same extensions but with content.
         fs::write(dir.join("good.mp4"), b"binary content").expect("write good mp4");
         fs::write(dir.join("good.ass"), b"[Script Info]\n").expect("write good ass");
+        fs::write(dir.join("good.mp3"), b"audio bytes").expect("write good mp3");
         // Unrelated files of other extensions are never touched.
         fs::write(dir.join("notes.txt"), b"").expect("write txt");
 
         let deleted = clean_stale_artifacts(&dir);
-        assert_eq!(deleted.len(), 2);
+        assert_eq!(deleted.len(), 5);
         assert!(!dir.join("ep.VietSub.mp4").exists());
         assert!(!dir.join("ep.eng.ass").exists());
+        assert!(!dir.join("ep.mp3").exists());
+        assert!(!dir.join("ep.aac").exists());
+        assert!(!dir.join("ep.flac").exists());
         assert!(dir.join("good.mp4").exists());
         assert!(dir.join("good.ass").exists());
+        assert!(dir.join("good.mp3").exists());
         assert!(dir.join("notes.txt").exists());
         let _ = fs::remove_dir_all(&dir);
     }

@@ -52,7 +52,7 @@ pub struct Settings {
     #[serde(default)]
     pub recent_projects: Vec<RecentProject>,
     /// Tier budget for the JobQueue's extract jobs (`ExtractSubtitle`
-    /// + `ExtractAudio`). Defaults to 2; user-configurable in
+    /// plus `ExtractAudio`). Defaults to 2; user-configurable in
     /// Settings (range 1–8, clamped on write). The render tier is
     /// always 1 per ADR-0003 and is not exposed.
     #[serde(default = "default_queue_concurrency_extract")]
@@ -277,8 +277,10 @@ mod tests {
 
     #[test]
     fn settings_round_trip_preserves_extract_concurrency() {
-        let mut s = Settings::default();
-        s.queue_concurrency_extract = 5;
+        let s = Settings {
+            queue_concurrency_extract: 5,
+            ..Settings::default()
+        };
         let text = serde_json::to_string(&s).expect("serialize");
         let back: Settings = serde_json::from_str(&text).expect("deserialize");
         assert_eq!(back.queue_concurrency_extract, 5);

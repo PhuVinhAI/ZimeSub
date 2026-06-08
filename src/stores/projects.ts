@@ -5,7 +5,9 @@ import {
   projectListRecents,
   projectOpen,
   projectRemoveRecent,
+  projectSetExtractAudioConfig,
   type AddEpisodesOutcome,
+  type ExtractAudioConfig,
   type ProjectJson,
   type RecentProjectStatus
 } from '@api/projects'
@@ -257,6 +259,27 @@ export async function setEpisodeSelectedTrack(
     setState({ active: project })
   } catch (err) {
     pushDangerToast(`Không lưu được track: ${messageOf(err)}`)
+    throw err instanceof Error ? err : new Error(messageOf(err))
+  }
+}
+
+/**
+ * Persist the project's `default_extract_audio` block from the
+ * Settings panel sub-form. Slice 0009. Updates `state.active` from
+ * the backend's post-write `ProjectJson` so the artefact-cache
+ * extension (used by the audio-badge derivation) stays in lockstep.
+ *
+ * Throws on backend failure so the sub-form can keep its draft
+ * state — the toast surfaces ambient feedback.
+ */
+export async function setExtractAudioConfig(config: ExtractAudioConfig): Promise<void> {
+  const folder = state.activeFolder
+  if (!folder) return
+  try {
+    const project = await projectSetExtractAudioConfig(folder, config)
+    setState({ active: project })
+  } catch (err) {
+    pushDangerToast(`Không lưu được cấu hình audio: ${messageOf(err)}`)
     throw err instanceof Error ? err : new Error(messageOf(err))
   }
 }

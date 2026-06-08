@@ -1,5 +1,6 @@
 import {
   episodeInspectArtifacts,
+  extractAudioStart,
   extractSubtitleStart,
   type EpisodeArtifactsView
 } from '@api/extract'
@@ -9,6 +10,7 @@ import {
   jobSnapshot,
   onJobProgress,
   onJobsChanged,
+  type JobKind,
   type JobProgressEvent,
   type JobsSnapshot,
   type JobView
@@ -82,6 +84,8 @@ const EMPTY_JOB_STATE: EpisodeJobState = {
 
 export interface EpisodeArtifactState {
   hasExtractedSub: boolean
+  hasExtractedAudio: boolean
+  audioExtension: string
   outputBasename: string
 }
 
@@ -100,8 +104,11 @@ interface JobsStoreShape {
   extractConcurrency: number
   /** Disk artefacts cache keyed by Episode.id. */
   artifacts: Record<string, EpisodeArtifactState>
-  /** Session-only "Không hỏi lại cho Episode này" set. */
+  /** Session-only "Không hỏi lại cho Episode này" set for the
+   *  subtitle overwrite-confirm modal. */
   dontAskOverwrite: Record<string, boolean>
+  /** Session-only don't-ask memory scoped to the audio overwrite-confirm modal. */
+  dontAskAudioOverwrite: Record<string, boolean>
   /** Project folder this snapshot belongs to (for cancel-on-project-switch). */
   activeFolder: string | null
 }
@@ -111,6 +118,7 @@ const [state, setState] = createStore<JobsStoreShape>({
   extractConcurrency: DEFAULT_EXTRACT_CONCURRENCY,
   artifacts: {},
   dontAskOverwrite: {},
+  dontAskAudioOverwrite: {},
   activeFolder: null
 })
 
@@ -145,16 +153,23 @@ export const topRunningJob = createMemo<JobView | null>(() => {
 })
 
 /**
- * Derived per-Episode extract state. Walks the global list for the
- * Episode's most recent job (the snapshot is newest-first so the
- * first match is the right one) and projects it onto the
- * {@link EpisodeJobState} the row template already knows how to
- * render.
+ * Derived per-Episode extract state for a given JobKind. Walks the
+ * global list for the Episode's most recent job of that kind (the
+ * snapshot is newest-first so the first match is the right one) and
+ * projects it onto the {@link EpisodeJobState} the row template
+ * already knows how to render.
+ *
+ * Slice 0009 generalises the slice 0007 helper from
+ * subtitle-only to any [`JobKind`] — the EpisodeRow now consults the
+ * derived state for `extract_subtitle` and `extract_audio`
+ * independently so the two buttons can each show their own progress
+ * bar / error badge.
  */
-export function jobStateFor(episodeId: string): EpisodeJobState {
-  const job = state.jobs.find(
-    j => j.episode_id === episodeId && j.kind === 'extract_subtitle'
-  )
+export function jobStateFor(
+  episodeId: string,
+  kind: JobKind = 'extract_subtitle'
+): EpisodeJobState {
+  const job = state.jobs.find(j => j.episode_id === episodeId && j.kind === kind)
   if (!job) return EMPTY_JOB_STATE
   return {
     jobId: job.id,
@@ -197,6 +212,19 @@ export function shouldConfirmOverwrite(episodeId: string): boolean {
   if (!artifacts) return false
   if (!artifacts.hasExtractedSub) return false
   return !state.dontAskOverwrite[episodeId]
+}
+
+/**
+ * Same as {@link shouldConfirmOverwrite} but for the audio artefact.
+ * Surfaces the audio-overwrite-confirm modal when the configured
+ * codec's file already exists on disk and the user hasn't toggled
+ * "Không hỏi lại" for this Episode this session.
+ */
+export function shouldConfirmAudioOverwrite(episodeId: string): boolean {
+  const artifacts = state.artifacts[episodeId]
+  if (!artifacts) return false
+  if (!artifacts.hasExtractedAudio) return false
+  return !state.dontAskAudioOverwrite[episodeId]
 }
 
 /* -------------------------------------------------------------------------- */
@@ -254,6 +282,54 @@ export async function cancelExtractSubtitle(episodeId: string): Promise<void> {
 }
 
 /**
+ * Enqueue a fresh audio extract job for `episodeId`. Slice 0009.
+ *
+ * Independent of the subtitle stage — the only failure surface here
+ * is a missing ffmpeg path or a project / episode lookup failure
+ * (both flow through to a danger toast). Idempotent for back-to-
+ * back clicks on the same Episode while an audio job is already in
+ * flight.
+ */
+export async function startExtractAudio(episodeId: string): Promise<void> {
+  const folder = state.activeFolder
+  if (!folder) return
+  const existing = state.jobs.find(
+    j =>
+      j.episode_id === episodeId &&
+      j.kind === 'extract_audio' &&
+      (j.status === 'pending' || j.status === 'running')
+  )
+  if (existing) return
+  const jobId = newJobId()
+  try {
+    await extractAudioStart(jobId, folder, episodeId)
+  } catch (err) {
+    const message = messageOf(err)
+    pushDangerToast(`Không khởi chạy được audio: ${message}`)
+  }
+}
+
+/**
+ * Cancel the in-flight audio extract job for `episodeId`. Backend
+ * kills the ffmpeg child and the cleanup pass removes the partial
+ * `<basename>.<ext>` from the EpisodeFolder.
+ */
+export async function cancelExtractAudio(episodeId: string): Promise<void> {
+  const job = state.jobs.find(
+    j =>
+      j.episode_id === episodeId &&
+      j.kind === 'extract_audio' &&
+      (j.status === 'pending' || j.status === 'running')
+  )
+  if (!job) return
+  try {
+    await jobCancel(job.id)
+  } catch (err) {
+    pushDangerToast(`Không hủy được job: ${messageOf(err)}`)
+  }
+}
+
+/**
  * Cancel by raw job id — used by the Jobs panel where the row
  * already knows its `JobView`. Same semantics as the per-Episode
  * variant; kept as a separate entry point so callers don't have to
@@ -283,16 +359,11 @@ export async function removePendingJobById(jobId: string): Promise<void> {
 
 /**
  * Retry a previously-failed job. The backend cannot resurrect the
- * terminal record so we enqueue a fresh `ExtractSubtitle` for the
- * same Episode; the old Failed row stays in the panel for the
+ * terminal record so we enqueue a fresh job of the same kind for
+ * the same Episode; the old Failed row stays in the panel for the
  * session per AC.
  */
 export async function retryJob(job: JobView): Promise<void> {
-  if (job.kind !== 'extract_subtitle') {
-    // Audio / Render retry surfaces land alongside slices 0009 /
-    // 0011. For 0008 we only ship the ExtractSubtitle path.
-    return
-  }
   const folder = state.activeFolder
   if (!folder || folder.toLowerCase() !== job.project_folder.toLowerCase()) {
     // The job belongs to a different project — open it first so the
@@ -301,7 +372,12 @@ export async function retryJob(job: JobView): Promise<void> {
     // coordinates the navigation.
     return
   }
-  await startExtractSubtitle(job.episode_id)
+  if (job.kind === 'extract_subtitle') {
+    await startExtractSubtitle(job.episode_id)
+  } else if (job.kind === 'extract_audio') {
+    await startExtractAudio(job.episode_id)
+  }
+  // Render retry surface lands alongside slice 0011.
 }
 
 /**
@@ -327,6 +403,10 @@ export function rememberDontAskOverwrite(episodeId: string): void {
   setState('dontAskOverwrite', episodeId, true)
 }
 
+export function rememberDontAskAudioOverwrite(episodeId: string): void {
+  setState('dontAskAudioOverwrite', episodeId, true)
+}
+
 /* -------------------------------------------------------------------------- */
 /* Disk-artefact cache                                                        */
 /* -------------------------------------------------------------------------- */
@@ -346,7 +426,8 @@ export async function setActiveProject(
   setState({
     activeFolder: folder,
     artifacts: {},
-    dontAskOverwrite: {}
+    dontAskOverwrite: {},
+    dontAskAudioOverwrite: {}
   })
   await Promise.all(
     episodeIds.map(async id => {
@@ -380,6 +461,8 @@ export async function refreshArtifactsForEpisode(episodeId: string): Promise<voi
 function applyArtifactSnapshot(episodeId: string, view: EpisodeArtifactsView): void {
   setState('artifacts', episodeId, {
     hasExtractedSub: view.has_extracted_sub,
+    hasExtractedAudio: view.has_extracted_audio,
+    audioExtension: view.audio_extension,
     outputBasename: view.output_basename
   })
 }

@@ -19,11 +19,11 @@ use tracing::error;
 
 use crate::episode_state::{self, EpisodeArtifacts};
 use crate::install::{self, InstallRegistry};
-use crate::job_queue::{ExtractSubtitleSpec, JobQueue, JobSpec, JobsSnapshot};
+use crate::job_queue::{ExtractAudioSpec, ExtractSubtitleSpec, JobQueue, JobSpec, JobsSnapshot};
 use crate::mkv_probe::{self, SubtitleTrack};
 use crate::process_runner::{self, RunSpec};
 use crate::project_store::{
-    self, AddEpisodesOutcome, FolderInspection, ProjectJson, RecentProjectStatus,
+    self, AddEpisodesOutcome, ExtractAudioConfig, FolderInspection, ProjectJson, RecentProjectStatus,
 };
 use crate::settings_store::{self, Settings};
 use crate::tooling::{self, RequiredTool, ToolReport};
@@ -398,31 +398,45 @@ pub fn project_set_selected_track(
 
 /// Disk-artefact snapshot for one Episode — the disk half of the
 /// PRD's `derive_state` pseudocode. Slice 0007 only flips
-/// `has_extracted_sub`; the other fields are present in the wire
-/// shape from day one so the frontend store doesn't need a follow-up
-/// rewrite when later slices light up the translate / render stages.
+/// `has_extracted_sub`; slice 0009 lights up `has_extracted_audio`
+/// (the audio is decorative — the EpisodeState progression does not
+/// depend on it). The remaining two fields stay placeholders for the
+/// translate / render stages.
 ///
 /// `output_basename` echoes back the EpisodeFolder name so the
 /// frontend can render the resolved artefact path (`<basename>.eng.ass`)
 /// in tooltips and the "open in Explorer" affordance later without a
 /// second round-trip through `resolve_episode_targets`.
+///
+/// `audio_extension` is the codec extension the project is configured
+/// for (`mp3` / `aac` / `flac`); the frontend uses it both to render
+/// the "audio" indicator's tooltip (`Đã có <basename>.<ext>`) and to
+/// resolve the artefact path on click-to-open later.
 #[derive(Debug, Serialize)]
 pub struct EpisodeArtifactsView {
     pub has_extracted_sub: bool,
+    pub has_extracted_audio: bool,
     pub has_translation_draft: bool,
     pub has_translated_sub: bool,
     pub has_render: bool,
     pub output_basename: String,
+    pub audio_extension: String,
 }
 
 impl EpisodeArtifactsView {
-    fn from_inspection(inspected: EpisodeArtifacts, output_basename: String) -> Self {
+    fn from_inspection(
+        inspected: EpisodeArtifacts,
+        output_basename: String,
+        audio_extension: String,
+    ) -> Self {
         Self {
             has_extracted_sub: inspected.has_extracted_sub,
+            has_extracted_audio: inspected.has_extracted_audio,
             has_translation_draft: inspected.has_translation_draft,
             has_translated_sub: inspected.has_translated_sub,
             has_render: inspected.has_render,
             output_basename,
+            audio_extension,
         }
     }
 }
@@ -447,15 +461,25 @@ pub fn episode_inspect_artifacts(
     episode_id: String,
 ) -> Result<EpisodeArtifactsView, String> {
     let project_folder = Path::new(&folder);
-    let targets = project_store::resolve_episode_targets(project_folder, &episode_id)
-        .map_err(|e| e.to_string())?;
-    let basename = targets
-        .episode_folder
-        .file_name()
-        .map(|s| s.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    let inspected = episode_state::inspect_artifacts(&targets.episode_folder, &basename);
-    Ok(EpisodeArtifactsView::from_inspection(inspected, basename))
+    let project = project_store::open_project(project_folder).map_err(|e| e.to_string())?;
+    let episode = project
+        .episodes
+        .iter()
+        .find(|e| e.id == episode_id)
+        .ok_or_else(|| "Không tìm thấy Episode trong project".to_string())?;
+    let episode_folder = project_folder.join(&episode.folder_name);
+    let basename = episode.folder_name.clone();
+    let audio_extension = project.default_extract_audio.output_extension().to_string();
+    let inspected = episode_state::inspect_artifacts(
+        &episode_folder,
+        &basename,
+        Some(&audio_extension),
+    );
+    Ok(EpisodeArtifactsView::from_inspection(
+        inspected,
+        basename,
+        audio_extension,
+    ))
 }
 
 /// Enqueue a fresh `ExtractSubtitle` job for `episode_id` on the
@@ -543,6 +567,111 @@ pub async fn extract_subtitle_cancel(
     let jobs = state.jobs(&app);
     let _ = jobs.cancel(&job_id).await;
     Ok(())
+}
+
+/// Enqueue a fresh `ExtractAudio` job for `episode_id`. Slice 0009.
+///
+/// Audio extraction is independent of the subtitle stage — the
+/// button is enabled regardless of `selected_subtitle_track_id` and
+/// the resulting artefact is decorative (does not gate EpisodeState
+/// progression). The only pre-conditions are that the project at
+/// `folder` loads, `episode_id` exists, and the cached `ffmpeg` path
+/// resolves.
+///
+/// The codec / quality used are read from the project's
+/// `default_extract_audio` block (managed via the Settings panel
+/// sub-form). The runner resolves the per-codec output extension and
+/// ffmpeg quality argv via [`ExtractAudioConfig::output_extension`]
+/// and [`ExtractAudioConfig::quality_args`].
+#[tauri::command]
+pub async fn extract_audio_start(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    job_id: String,
+    folder: String,
+    episode_id: String,
+) -> Result<(), String> {
+    let project_folder = Path::new(&folder);
+    let project = project_store::open_project(project_folder).map_err(|e| e.to_string())?;
+    let episode = project
+        .episodes
+        .iter()
+        .find(|e| e.id == episode_id)
+        .ok_or_else(|| "Không tìm thấy Episode trong project".to_string())?;
+
+    let (ffmpeg_path, mkvmerge_path) = {
+        let settings = state
+            .settings
+            .lock()
+            .map_err(|e| format!("settings mutex poisoned: {e}"))?;
+        let ffmpeg = settings
+            .tool_paths
+            .get("ffmpeg")
+            .cloned()
+            .ok_or_else(|| "Chưa phát hiện đường dẫn ffmpeg".to_string())?;
+        let mkvmerge = settings.tool_paths.get("mkvmerge").cloned();
+        (ffmpeg, mkvmerge)
+    };
+
+    let audio_cfg = project.default_extract_audio.clone();
+    let output_extension = audio_cfg.output_extension().to_string();
+    let quality_args = audio_cfg.quality_args();
+
+    let episode_folder = project_folder.join(&episode.folder_name);
+    let spec = ExtractAudioSpec {
+        job_id,
+        episode_id,
+        episode_name: episode.folder_name.clone(),
+        project_folder: project_folder.to_path_buf(),
+        ffmpeg_path: PathBuf::from(ffmpeg_path),
+        mkvmerge_path: mkvmerge_path.map(PathBuf::from),
+        source_mkv_path: PathBuf::from(&episode.source_mkv_path),
+        episode_folder,
+        output_basename: episode.folder_name.clone(),
+        codec: audio_cfg.codec,
+        output_extension,
+        quality_args,
+    };
+
+    let jobs = state.jobs(&app);
+    jobs.enqueue(JobSpec::ExtractAudio(spec)).await;
+    Ok(())
+}
+
+/// Cancel a queued or running extract-audio job by id. Mirrors the
+/// subtitle variant — idempotent on unknown / terminal ids, partial
+/// output cleanup happens inside the runner.
+#[tauri::command]
+pub async fn extract_audio_cancel(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    job_id: String,
+) -> Result<(), String> {
+    let jobs = state.jobs(&app);
+    let _ = jobs.cancel(&job_id).await;
+    Ok(())
+}
+
+/// Read the project's `default_extract_audio` config. Drives the
+/// Settings panel sub-form on open so the dropdown + quality field
+/// boot with the persisted choice.
+#[tauri::command]
+pub fn project_get_extract_audio_config(folder: String) -> Result<ExtractAudioConfig, String> {
+    let project = project_store::open_project(Path::new(&folder)).map_err(|e| e.to_string())?;
+    Ok(project.default_extract_audio)
+}
+
+/// Persist a new `default_extract_audio` block. Used by the Settings
+/// panel sub-form's commit path. Returns the post-write
+/// [`ProjectJson`] so the frontend can swap `active` without a
+/// second `project_open` round-trip.
+#[tauri::command]
+pub fn project_set_extract_audio_config(
+    folder: String,
+    config: ExtractAudioConfig,
+) -> Result<ProjectJson, String> {
+    project_store::set_default_extract_audio(Path::new(&folder), config)
+        .map_err(|e| e.to_string())
 }
 
 /// Snapshot of the entire `JobQueue` — drives the Jobs panel on

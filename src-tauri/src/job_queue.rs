@@ -1,7 +1,7 @@
 //! Tiered background job runner — slice 0008.
 //!
 //! ADR-0003 calls for a tiered scheduler (at most 1 `Render` Running
-//! + at most N `ExtractSubtitle`/`ExtractAudio` Running, with N
+//! plus at most N `ExtractSubtitle`/`ExtractAudio` Running, with N
 //! defaulting to 2 and user-configurable in Settings). This module
 //! promotes the slice-0007 serial queue into that shape:
 //!
@@ -18,6 +18,7 @@
 //!     * `Render` budget: `1 - running_render_count`.
 //!     * Extract budget: `extract_concurrency - running_extract_count`
 //!       (combined `ExtractSubtitle` + `ExtractAudio`).
+//!
 //!    Each newly-promoted job is `tokio::spawn`'d as its own task;
 //!    on exit the task calls `notify_dispatcher` so freed slots are
 //!    immediately consumed by the next FIFO pending job.
@@ -37,13 +38,15 @@
 //! 5. Per-`JobKind` cleanup table (mirrors the AC, applies on cancel
 //!    or failed completion of a Running job):
 //!     * `ExtractSubtitle` → `<basename>.eng.ass`
-//!     * `ExtractAudio`    → `<basename>.mp3`   (audio runner lands in 0009)
+//!     * `ExtractAudio`    → `<basename>.<configured-ext>`  (mp3/aac/flac per slice 0009)
 //!     * `Render`          → `<basename>.VietSub.mp4` (render runner lands in 0011)
 //!
-//! Only `ExtractSubtitle` has a runnable [`JobSpec`] variant in slice
-//! 0008; the `JobKind` discriminator and the cleanup table are
-//! defined for all three from day one so 0009/0011 land without
-//! churning the surrounding queue plumbing.
+//! Slice 0009 wires the `ExtractAudio` runnable spec — ffmpeg with
+//! `-vn -c:a <codec> <quality-args> <basename>.<ext>`, cwd =
+//! EpisodeFolder. Total duration is queried up-front via
+//! `mkvmerge -J` or `ffprobe` (whichever is available) and combined
+//! with ffmpeg's stderr `time=` token to produce the same `[0, 1]`
+//! ratio surface as the subtitle extract pipeline.
 
 use std::path::PathBuf;
 use std::process::Stdio;
@@ -59,6 +62,7 @@ use tokio::sync::{Mutex, Notify};
 use tracing::{error, info, warn};
 
 use crate::ass_ops;
+use crate::duration_probe;
 use crate::progress_parsers;
 
 /// Event name fired on every structural change to the queue (enqueue,
@@ -93,15 +97,14 @@ const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 /// Discriminator for the kind of work a job represents.
 ///
 /// All three variants are recognised by the dispatcher's tier budget
-/// + the per-kind cleanup table from day one of slice 0008, but only
-/// [`JobKind::ExtractSubtitle`] has a runnable [`JobSpec`] variant —
-/// audio and render runners land with slices 0009 and 0011.
+/// plus the per-kind cleanup table from day one of slice 0008. Slice
+/// 0009 lights up the [`JobKind::ExtractAudio`] runnable variant; the
+/// render runner lands with slice 0011.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum JobKind {
     ExtractSubtitle,
-    /// Audio extract — runnable spec lands in slice 0009.
-    #[allow(dead_code)]
+    /// Audio extract — runnable spec wired in slice 0009.
     ExtractAudio,
     /// Hardsub render — runnable spec lands in slice 0011.
     #[allow(dead_code)]
@@ -114,18 +117,6 @@ impl JobKind {
         match self {
             JobKind::ExtractSubtitle | JobKind::ExtractAudio => Tier::Extract,
             JobKind::Render => Tier::Render,
-        }
-    }
-
-    /// Per-kind partial-output filename derived from `basename`.
-    /// Used by the cleanup pass on cancel / failed completion of a
-    /// Running job. The mapping mirrors the AC's per-kind cleanup
-    /// table verbatim.
-    fn partial_output_filename(self, basename: &str) -> String {
-        match self {
-            JobKind::ExtractSubtitle => format!("{basename}.eng.ass"),
-            JobKind::ExtractAudio => format!("{basename}.mp3"),
-            JobKind::Render => format!("{basename}.VietSub.mp4"),
         }
     }
 }
@@ -167,42 +158,77 @@ pub struct ExtractSubtitleSpec {
     pub output_basename: String,
 }
 
-/// Per-kind runnable specs. Only `ExtractSubtitle` is implemented in
-/// slice 0008; the `ExtractAudio` and `Render` variants will be added
-/// by their owning slices.
+/// Concrete spec for an `ExtractAudio` job. Slice 0009.
+///
+/// All paths are absolute. `codec` is one of the three project-level
+/// choices (`libmp3lame` / `aac` / `flac`); the per-codec output
+/// extension + ffmpeg quality argv is computed once on the project
+/// side via [`crate::project_store::ExtractAudioConfig`] so the runner
+/// never has to know the codec/quality mapping itself.
+///
+/// `mkvmerge_path` is `None` when the user has somehow lost the
+/// `mkvmerge` cache (rare, but the AC asks for graceful fallback);
+/// the runner then falls back to ffprobe-only duration probing.
+#[derive(Clone, Debug)]
+pub struct ExtractAudioSpec {
+    pub job_id: String,
+    pub episode_id: String,
+    pub episode_name: String,
+    pub project_folder: PathBuf,
+    pub ffmpeg_path: PathBuf,
+    pub mkvmerge_path: Option<PathBuf>,
+    pub source_mkv_path: PathBuf,
+    pub episode_folder: PathBuf,
+    pub output_basename: String,
+    pub codec: String,
+    pub output_extension: String,
+    pub quality_args: Vec<String>,
+}
+
+/// Per-kind runnable specs.
+///
+/// Slice 0008 shipped only the subtitle variant; slice 0009 adds
+/// audio. The `Render` runner lands in slice 0011 and will add a
+/// third variant alongside.
 #[derive(Clone, Debug)]
 pub enum JobSpec {
     ExtractSubtitle(ExtractSubtitleSpec),
+    ExtractAudio(ExtractAudioSpec),
 }
 
 impl JobSpec {
     fn kind(&self) -> JobKind {
         match self {
             JobSpec::ExtractSubtitle(_) => JobKind::ExtractSubtitle,
+            JobSpec::ExtractAudio(_) => JobKind::ExtractAudio,
         }
     }
 
     fn job_id(&self) -> &str {
         match self {
             JobSpec::ExtractSubtitle(s) => &s.job_id,
+            JobSpec::ExtractAudio(s) => &s.job_id,
         }
     }
 
     fn episode_id(&self) -> &str {
         match self {
             JobSpec::ExtractSubtitle(s) => &s.episode_id,
+            JobSpec::ExtractAudio(s) => &s.episode_id,
         }
     }
 
     fn episode_name(&self) -> &str {
         match self {
             JobSpec::ExtractSubtitle(s) => &s.episode_name,
+            JobSpec::ExtractAudio(s) => &s.episode_name,
         }
     }
 
     fn project_folder(&self) -> PathBuf {
         match self {
             JobSpec::ExtractSubtitle(s) => s.project_folder.clone(),
+            JobSpec::ExtractAudio(s) => s.project_folder.clone(),
         }
     }
 }
@@ -632,6 +658,15 @@ fn spawn_runner(queue: Arc<JobQueue>, job_id: String) {
                 )
                 .await
             }
+            JobSpec::ExtractAudio(spec) => {
+                run_extract_audio(
+                    queue.app.clone(),
+                    spec,
+                    input.cancel_notify,
+                    input.cancelled_flag,
+                )
+                .await
+            }
         };
 
         apply_terminal_outcome(&queue, &job_id, outcome).await;
@@ -781,7 +816,7 @@ async fn run_extract_subtitle(
     };
 
     if !final_outcome.success {
-        cleanup_partial_output(JobKind::ExtractSubtitle, &spec.episode_folder, &spec.output_basename);
+        cleanup_partial_output_for_subtitle(&spec.episode_folder, &spec.output_basename);
     }
 
     info!(
@@ -826,6 +861,362 @@ struct Supervised {
     stderr: String,
     ratio: f32,
     hint: String,
+}
+
+/// Run one `ExtractAudio` job to completion (success, failure, or
+/// cancellation). Slice 0009.
+///
+/// Flow:
+///  1. Probe the source duration via `mkvmerge -J` (preferred — it's
+///     already on disk), falling back to ffprobe if that's available.
+///     If both fail we still extract; the progress bar runs in
+///     "indeterminate" mode (line count, no ratio) per AC.
+///  2. Spawn ffmpeg with `-hide_banner -i <source> -vn -c:a <codec>
+///     <quality-args> <basename>.<ext>`, cwd = EpisodeFolder.
+///  3. Per stderr line: feed [`progress_parsers::parse_ffmpeg_time_us`]
+///     and emit a [`progress_parsers::ffmpeg_progress`] update when
+///     we have a known total. On indeterminate runs we emit a
+///     `ratio = 0.0` update with the count of accumulated stderr
+///     lines as the hint so the row keeps ticking.
+///  4. Cancel + cleanup mirrors the subtitle pipeline.
+async fn run_extract_audio(
+    app: AppHandle,
+    spec: ExtractAudioSpec,
+    cancel: Arc<Notify>,
+    cancelled: Arc<AtomicBool>,
+) -> TerminalOutcome {
+    let output_path = spec
+        .episode_folder
+        .join(format!("{}.{}", spec.output_basename, spec.output_extension));
+
+    // Short-circuit pre-spawn cancellation, mirrors the subtitle path.
+    if cancelled.load(Ordering::SeqCst) {
+        return TerminalOutcome {
+            status: JobStatus::Cancelled,
+            ratio: 0.0,
+            hint: String::new(),
+            error: None,
+            stderr: String::new(),
+            exit_code: None,
+            cancelled: true,
+        };
+    }
+
+    let total_duration_us = probe_total_duration(&spec).await;
+
+    let mut args: Vec<String> = Vec::with_capacity(8 + spec.quality_args.len());
+    args.push("-hide_banner".into());
+    args.push("-y".into()); // We already prompted the user via the overwrite-confirm modal.
+    args.push("-i".into());
+    args.push(spec.source_mkv_path.to_string_lossy().into_owned());
+    args.push("-vn".into());
+    args.push("-c:a".into());
+    args.push(spec.codec.clone());
+    args.extend(spec.quality_args.iter().cloned());
+    args.push(output_path.to_string_lossy().into_owned());
+
+    info!(
+        job_id = spec.job_id,
+        episode_id = spec.episode_id,
+        codec = spec.codec,
+        source = %spec.source_mkv_path.display(),
+        output = %output_path.display(),
+        duration_us = total_duration_us.unwrap_or(0),
+        "starting extract audio job"
+    );
+
+    let mut cmd = Command::new(&spec.ffmpeg_path);
+    cmd.args(&args)
+        .current_dir(&spec.episode_folder)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt as _;
+        cmd.as_std_mut().creation_flags(CREATE_NO_WINDOW);
+    }
+
+    let child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) => {
+            let msg = format!("Không khởi chạy được ffmpeg: {e}");
+            error!(job_id = spec.job_id, error = %e, "ffmpeg spawn failed");
+            return TerminalOutcome {
+                status: JobStatus::Failed,
+                ratio: 0.0,
+                hint: String::new(),
+                error: Some(msg),
+                stderr: String::new(),
+                exit_code: None,
+                cancelled: false,
+            };
+        }
+    };
+
+    let supervised = supervise_audio(
+        app.clone(),
+        &spec,
+        child,
+        cancel,
+        cancelled,
+        total_duration_us,
+    )
+    .await;
+
+    if !supervised.success {
+        cleanup_partial_output_for_audio(
+            &spec.episode_folder,
+            &spec.output_basename,
+            &spec.output_extension,
+        );
+    }
+
+    info!(
+        job_id = spec.job_id,
+        episode_id = spec.episode_id,
+        success = supervised.success,
+        cancelled = supervised.cancelled,
+        exit_code = ?supervised.exit_code,
+        "extract audio job finished"
+    );
+
+    let status = if supervised.cancelled {
+        JobStatus::Cancelled
+    } else if supervised.success {
+        JobStatus::Done
+    } else {
+        JobStatus::Failed
+    };
+
+    TerminalOutcome {
+        status,
+        ratio: if supervised.success { 1.0 } else { supervised.ratio },
+        hint: supervised.hint,
+        error: supervised.error,
+        stderr: supervised.stderr,
+        exit_code: supervised.exit_code,
+        cancelled: supervised.cancelled,
+    }
+}
+
+/// Drive the ffmpeg child to completion. Same shape as
+/// [`supervise`] but the stderr parser feeds `parse_ffmpeg_time_us`
+/// + a known total to produce the progress ratio.
+async fn supervise_audio(
+    app: AppHandle,
+    spec: &ExtractAudioSpec,
+    mut child: tokio::process::Child,
+    cancel: Arc<Notify>,
+    cancelled: Arc<AtomicBool>,
+    initial_total_us: Option<u64>,
+) -> Supervised {
+    let stderr = child.stderr.take().expect("piped above; take-once contract");
+    let stdout = child.stdout.take().expect("piped above; take-once contract");
+
+    let stderr_buf: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));
+    let progress_buf: Arc<Mutex<(f32, String)>> = Arc::new(Mutex::new((0.0, String::new())));
+    // Mutable inside the reader task: the duration probe may have
+    // failed (None) and ffmpeg's own banner Duration: line is then
+    // our only source — the reader updates this slot the moment it
+    // catches the marker.
+    let total_us: Arc<Mutex<Option<u64>>> = Arc::new(Mutex::new(initial_total_us));
+
+    let stderr_buf_for_task = stderr_buf.clone();
+    let progress_buf_for_task = progress_buf.clone();
+    let total_us_for_task = total_us.clone();
+    let app_for_stderr = app.clone();
+    let job_id_for_stderr = spec.job_id.clone();
+
+    let stderr_task = tauri::async_runtime::spawn(async move {
+        let mut lines = BufReader::new(stderr).lines();
+        let mut indeterminate_count: u64 = 0;
+        loop {
+            match lines.next_line().await {
+                Ok(Some(line)) => {
+                    {
+                        let mut buf = stderr_buf_for_task.lock().await;
+                        buf.push_str(&line);
+                        buf.push('\n');
+                    }
+
+                    // Lazily seed total duration from the banner line
+                    // when the up-front probe failed.
+                    let mut have_total = {
+                        let guard = total_us_for_task.lock().await;
+                        guard.is_some()
+                    };
+                    if !have_total
+                        && let Some(parsed) = progress_parsers::parse_ffmpeg_duration(&line)
+                    {
+                        let mut guard = total_us_for_task.lock().await;
+                        if guard.is_none() {
+                            *guard = Some(parsed);
+                            have_total = true;
+                        }
+                    }
+
+                    if let Some(elapsed_us) =
+                        progress_parsers::parse_ffmpeg_time_us(&line)
+                    {
+                        let total_opt = {
+                            let guard = total_us_for_task.lock().await;
+                            *guard
+                        };
+                        let update = if let Some(total) = total_opt {
+                            progress_parsers::ffmpeg_progress(elapsed_us, total)
+                        } else {
+                            // Indeterminate fallback per AC — emit a
+                            // tick so the row stays alive but with
+                            // ratio = 0 so the bar doesn't pretend.
+                            indeterminate_count += 1;
+                            progress_parsers::ProgressUpdate {
+                                ratio: 0.0,
+                                hint: format!("Đang trích xuất (~{indeterminate_count})"),
+                            }
+                        };
+                        {
+                            let mut latest = progress_buf_for_task.lock().await;
+                            *latest = (update.ratio, update.hint.clone());
+                        }
+                        emit_progress(
+                            &app_for_stderr,
+                            &job_id_for_stderr,
+                            update.ratio,
+                            update.hint,
+                        );
+                    } else if !have_total
+                        // Even non-time lines bump the indeterminate
+                        // counter so the row keeps ticking when we
+                        // can't size the bar yet.
+                        && !line.trim().is_empty()
+                    {
+                        indeterminate_count += 1;
+                        let update = progress_parsers::ProgressUpdate {
+                            ratio: 0.0,
+                            hint: format!("Đang chuẩn bị (~{indeterminate_count})"),
+                        };
+                        {
+                            let mut latest = progress_buf_for_task.lock().await;
+                            *latest = (update.ratio, update.hint.clone());
+                        }
+                        emit_progress(
+                            &app_for_stderr,
+                            &job_id_for_stderr,
+                            update.ratio,
+                            update.hint,
+                        );
+                    }
+                }
+                Ok(None) => break,
+                Err(e) => {
+                    warn!(error = %e, "audio stderr reader failed");
+                    break;
+                }
+            }
+        }
+    });
+
+    let stdout_task = tauri::async_runtime::spawn(async move {
+        let mut lines = BufReader::new(stdout).lines();
+        while let Ok(Some(_)) = lines.next_line().await {}
+    });
+
+    let cancel_signal = cancel.notified();
+    tokio::pin!(cancel_signal);
+
+    let (exit_code, was_cancelled, runtime_error) = tokio::select! {
+        biased;
+        _ = &mut cancel_signal => {
+            warn!(job_id = spec.job_id, "audio extract cancellation received");
+            let _ = child.start_kill();
+            match child.wait().await {
+                Ok(status) => (status.code(), true, None),
+                Err(e) => (None, true, Some(format!("Lỗi khi chờ ffmpeg thoát: {e}"))),
+            }
+        }
+        wait_result = child.wait() => {
+            match wait_result {
+                Ok(status) => {
+                    let was_cancelled = cancelled.load(Ordering::SeqCst);
+                    (status.code(), was_cancelled, None)
+                }
+                Err(e) => (None, false, Some(format!("Lỗi khi chờ ffmpeg thoát: {e}"))),
+            }
+        }
+    };
+
+    let _ = tokio::join!(stderr_task, stdout_task);
+
+    let stderr_text = {
+        let buf = stderr_buf.lock().await;
+        buf.clone()
+    };
+    let (ratio, hint) = {
+        let latest = progress_buf.lock().await;
+        latest.clone()
+    };
+
+    let success = !was_cancelled && exit_code == Some(0) && runtime_error.is_none();
+    let error_msg = runtime_error.or_else(|| {
+        if !success && !was_cancelled {
+            Some(match exit_code {
+                Some(c) => format!("ffmpeg trả về exit code {c}"),
+                None => "ffmpeg kết thúc bất thường".to_string(),
+            })
+        } else {
+            None
+        }
+    });
+
+    Supervised {
+        success,
+        cancelled: was_cancelled,
+        exit_code,
+        error: error_msg,
+        stderr: stderr_text,
+        ratio,
+        hint,
+    }
+}
+
+/// Run the up-front duration probe via mkvmerge (preferred) → ffprobe
+/// (fallback). Returns `None` when both probes fail; the runner then
+/// falls back to indeterminate progress (ffmpeg's banner `Duration:`
+/// line still gives the reader task a chance to switch to determinate
+/// mid-stream).
+async fn probe_total_duration(spec: &ExtractAudioSpec) -> Option<u64> {
+    // mkvmerge first — it's the canonical mkv tool and the same probe
+    // that powers slice 0006's track list. The closure captures owned
+    // clones so spawn_blocking can move them.
+    if let Some(mkvmerge_path) = spec.mkvmerge_path.clone() {
+        let source = spec.source_mkv_path.clone();
+        let probe_result =
+            tokio::task::spawn_blocking(move || {
+                duration_probe::probe_duration_via_mkvmerge(&mkvmerge_path, &source)
+            })
+            .await
+            .ok()
+            .flatten();
+        if let Some(us) = probe_result {
+            return Some(us);
+        }
+    }
+
+    // ffprobe fallback. We resolve `ffprobe.exe` from the cached
+    // ffmpeg path because the Onboarding install drops them in the
+    // same `bin/` directory. If the swap doesn't resolve, give up
+    // and let the reader task pick up the banner Duration: line.
+    let ffprobe = duration_probe::ffprobe_path_from_ffmpeg(&spec.ffmpeg_path)?;
+    let source = spec.source_mkv_path.clone();
+    tokio::task::spawn_blocking(move || {
+        duration_probe::probe_duration_via_ffprobe(&ffprobe, &source)
+    })
+    .await
+    .ok()
+    .flatten()
 }
 
 /// Drive the child to completion, racing against the cancel signal.
@@ -980,29 +1371,44 @@ fn looks_like_srt(text: &str) -> bool {
     first_trimmed.contains(" --> ")
 }
 
-/// Delete the per-`JobKind` partial output file inside
-/// `episode_folder`, plus any historical sibling output that earlier
-/// pipeline revisions may have written. Idempotent — missing files
-/// are silently ignored. Called on any non-success exit so the user
-/// is never left staring at a half-written artefact that
-/// `derive_state` would misidentify as a real output.
+/// Delete the per-`JobKind` partial output file for ExtractSubtitle,
+/// plus any historical sibling output that earlier pipeline revisions
+/// may have written. Idempotent — missing files are silently ignored.
+/// Called on any non-success exit so the user is never left staring at
+/// a half-written artefact that `derive_state` would misidentify as a
+/// real output.
 ///
-/// The mapping mirrors the AC's per-kind cleanup table verbatim.
 /// `ExtractSubtitle` additionally clears the legacy `.eng.srt`
 /// intermediate name even though slice 0008 extracts straight to
 /// `.eng.ass` — listing it means a future change that re-introduces
 /// an intermediate SRT won't leak a file on cancel.
-fn cleanup_partial_output(kind: JobKind, episode_folder: &std::path::Path, basename: &str) {
-    let mut candidates: Vec<PathBuf> = vec![episode_folder.join(kind.partial_output_filename(basename))];
-    if kind == JobKind::ExtractSubtitle {
-        candidates.push(episode_folder.join(format!("{basename}.eng.srt")));
-    }
-    for path in &candidates {
+fn cleanup_partial_output_for_subtitle(episode_folder: &std::path::Path, basename: &str) {
+    let candidates: Vec<PathBuf> = vec![
+        episode_folder.join(format!("{basename}.eng.ass")),
+        episode_folder.join(format!("{basename}.eng.srt")),
+    ];
+    delete_paths_silently(&candidates);
+}
+
+/// Delete the per-`JobKind` partial output file for ExtractAudio.
+/// Slice 0009. The configured codec dictates the extension —
+/// `.mp3` / `.aac` / `.flac` — so a cancelled aac extract doesn't
+/// accidentally remove a legit mp3 from an earlier extract.
+fn cleanup_partial_output_for_audio(
+    episode_folder: &std::path::Path,
+    basename: &str,
+    extension: &str,
+) {
+    let candidate = episode_folder.join(format!("{basename}.{extension}"));
+    delete_paths_silently(&[candidate]);
+}
+
+fn delete_paths_silently(paths: &[PathBuf]) {
+    for path in paths {
         if path.exists()
             && let Err(e) = std::fs::remove_file(path)
         {
             warn!(
-                kind = ?kind,
                 path = %path.display(),
                 error = %e,
                 "failed to clean up partial output"
@@ -1075,20 +1481,21 @@ mod tests {
         }
     }
 
-    #[test]
-    fn job_kind_partial_output_table_matches_ac() {
-        assert_eq!(
-            JobKind::ExtractSubtitle.partial_output_filename("ep01"),
-            "ep01.eng.ass"
-        );
-        assert_eq!(
-            JobKind::ExtractAudio.partial_output_filename("ep01"),
-            "ep01.mp3"
-        );
-        assert_eq!(
-            JobKind::Render.partial_output_filename("ep01"),
-            "ep01.VietSub.mp4"
-        );
+    fn make_audio_spec(job_id: &str, episode_id: &str, codec: &str, ext: &str) -> ExtractAudioSpec {
+        ExtractAudioSpec {
+            job_id: job_id.into(),
+            episode_id: episode_id.into(),
+            episode_name: format!("ep-{episode_id}"),
+            project_folder: PathBuf::from(r"C:\proj"),
+            ffmpeg_path: PathBuf::from("ffmpeg"),
+            mkvmerge_path: Some(PathBuf::from("mkvmerge")),
+            source_mkv_path: PathBuf::from(r"C:\src\file.mkv"),
+            episode_folder: PathBuf::from(r"C:\proj\ep01"),
+            output_basename: "ep01".into(),
+            codec: codec.into(),
+            output_extension: ext.into(),
+            quality_args: vec!["-q:a".into(), "2".into()],
+        }
     }
 
     #[test]
@@ -1099,6 +1506,24 @@ mod tests {
         assert_eq!(clamp_extract_concurrency(8), 8);
         assert_eq!(clamp_extract_concurrency(9), 8);
         assert_eq!(clamp_extract_concurrency(255), 8);
+    }
+
+    #[test]
+    fn audio_spec_resolves_per_codec_extensions() {
+        // Smoke-test the spec shape — the dispatcher reads this on
+        // every enqueue and we don't want a typo in the field names
+        // to silently break the audio runner.
+        let mp3 = make_audio_spec("j", "e", "libmp3lame", "mp3");
+        let aac = make_audio_spec("j", "e", "aac", "aac");
+        let flac = make_audio_spec("j", "e", "flac", "flac");
+        assert_eq!(mp3.output_extension, "mp3");
+        assert_eq!(aac.output_extension, "aac");
+        assert_eq!(flac.output_extension, "flac");
+        assert_eq!(
+            JobSpec::ExtractAudio(mp3.clone()).kind(),
+            JobKind::ExtractAudio
+        );
+        assert_eq!(JobSpec::ExtractAudio(mp3).job_id(), "j");
     }
 
     #[test]
@@ -1136,7 +1561,7 @@ mod tests {
         std::fs::write(dir.join("ep.eng.srt"), b"partial").unwrap();
         std::fs::write(dir.join("keepme.txt"), b"safe").unwrap();
 
-        cleanup_partial_output(JobKind::ExtractSubtitle, &dir, "ep");
+        cleanup_partial_output_for_subtitle(&dir, "ep");
 
         assert!(!dir.join("ep.eng.ass").exists());
         assert!(!dir.join("ep.eng.srt").exists());
@@ -1146,22 +1571,24 @@ mod tests {
     }
 
     #[test]
-    fn cleanup_for_render_targets_vietsub_mp4_only() {
+    fn cleanup_audio_removes_only_configured_extension() {
         use std::env;
         let pid = std::process::id();
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.subsec_nanos())
             .unwrap_or(0);
-        let dir = env::temp_dir().join(format!("zimesub-cleanup-render-{pid}-{nanos}"));
+        let dir = env::temp_dir().join(format!("zimesub-cleanup-audio-{pid}-{nanos}"));
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("ep.VietSub.mp4"), b"partial").unwrap();
-        std::fs::write(dir.join("ep.eng.ass"), b"safe").unwrap();
+        std::fs::write(dir.join("ep.mp3"), b"partial").unwrap();
+        std::fs::write(dir.join("ep.aac"), b"partial").unwrap();
+        std::fs::write(dir.join("ep.flac"), b"partial").unwrap();
 
-        cleanup_partial_output(JobKind::Render, &dir, "ep");
-
-        assert!(!dir.join("ep.VietSub.mp4").exists());
-        assert!(dir.join("ep.eng.ass").exists());
+        // Cancelling an aac extract must not touch the mp3 / flac.
+        cleanup_partial_output_for_audio(&dir, "ep", "aac");
+        assert!(dir.join("ep.mp3").exists());
+        assert!(!dir.join("ep.aac").exists());
+        assert!(dir.join("ep.flac").exists());
 
         let _ = std::fs::remove_dir_all(&dir);
     }

@@ -150,3 +150,32 @@ export async function projectAddEpisodes(
     sourcePaths
   })
 }
+
+/**
+ * Read the project's `default_extract_audio` block. Drives the
+ * Settings panel sub-form on open so the codec dropdown + quality
+ * field boot with the persisted choice.
+ */
+export async function projectGetExtractAudioConfig(
+  folder: string
+): Promise<ExtractAudioConfig> {
+  return invoke<ExtractAudioConfig>('project_get_extract_audio_config', {
+    folder
+  })
+}
+
+/**
+ * Persist a new `default_extract_audio` block. Backend coerces
+ * unknown codecs to `libmp3lame` and rewrites `zimesub.json`
+ * atomically. Returns the post-write project so the projects store
+ * can swap `active` without a second `project_open` round-trip.
+ */
+export async function projectSetExtractAudioConfig(
+  folder: string,
+  config: ExtractAudioConfig
+): Promise<ProjectJson> {
+  return invoke<ProjectJson>('project_set_extract_audio_config', {
+    folder,
+    config
+  })
+}

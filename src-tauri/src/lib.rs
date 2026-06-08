@@ -1,5 +1,6 @@
 mod ass_ops;
 mod commands;
+mod duration_probe;
 mod episode_state;
 mod install;
 mod job_queue;
@@ -55,6 +56,10 @@ pub fn run() {
             commands::episode_inspect_artifacts,
             commands::extract_subtitle_start,
             commands::extract_subtitle_cancel,
+            commands::extract_audio_start,
+            commands::extract_audio_cancel,
+            commands::project_get_extract_audio_config,
+            commands::project_set_extract_audio_config,
             commands::job_snapshot,
             commands::job_cancel,
             commands::job_remove_pending,

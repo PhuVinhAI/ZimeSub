@@ -83,6 +83,71 @@ impl ExtractAudioConfig {
             quality_or_bitrate: "q:a 2".to_string(),
         }
     }
+
+    /// File extension produced for `codec`. Used by both the ffmpeg
+    /// argv (`-c:a libmp3lame … <basename>.mp3`) and the artefact
+    /// inspector (slice 0009 surfaces a small "audio" badge when the
+    /// matching file exists). Unknown codecs default to `mp3` so a
+    /// future ffmpeg-only codec drop still has a sensible filename.
+    pub fn output_extension(&self) -> &'static str {
+        match self.codec.as_str() {
+            "aac" => "aac",
+            "flac" => "flac",
+            // libmp3lame / unknown
+            _ => "mp3",
+        }
+    }
+
+    /// Resolve `quality_or_bitrate` into the ffmpeg argv tokens that
+    /// follow `-c:a <codec>`. Returns a Vec because aac uses `-b:a
+    /// 192k` (two argv entries) while mp3 uses `-q:a 2` (also two);
+    /// flac takes no quality flag at all (returns empty Vec).
+    ///
+    /// Format conventions in the stored string:
+    ///  * mp3 → `"q:a N"` where 0 ≤ N ≤ 9 (ffmpeg VBR quality).
+    ///  * aac → `"b:a NNNk"` where NNN is the kbps bitrate.
+    ///  * flac → ignored (no quality knob for the lossless codec).
+    ///
+    /// Malformed values fall back to the default for the codec to
+    /// keep the runner from ever producing argv that ffmpeg rejects.
+    pub fn quality_args(&self) -> Vec<String> {
+        match self.codec.as_str() {
+            "libmp3lame" => {
+                let q = parse_mp3_quality(&self.quality_or_bitrate).unwrap_or(2);
+                vec!["-q:a".to_string(), q.to_string()]
+            }
+            "aac" => {
+                let kbps = parse_aac_bitrate(&self.quality_or_bitrate).unwrap_or(192);
+                vec!["-b:a".to_string(), format!("{kbps}k")]
+            }
+            "flac" => Vec::new(),
+            _ => {
+                // Unknown codec — fall back to default mp3 args so the
+                // runner never produces something ffmpeg can't parse.
+                vec!["-q:a".to_string(), "2".to_string()]
+            }
+        }
+    }
+}
+
+/// Extract the integer N from `"q:a N"` (with whitespace tolerance).
+/// Returns `None` for anything that doesn't look like the mp3-quality
+/// shape; the caller falls back to the default `2`.
+fn parse_mp3_quality(value: &str) -> Option<u8> {
+    let trimmed = value.trim();
+    let rest = trimmed.strip_prefix("q:a")?.trim_start();
+    let n: u8 = rest.parse().ok()?;
+    if n > 9 { None } else { Some(n) }
+}
+
+/// Extract the integer kbps from `"b:a NNNk"` (with whitespace
+/// tolerance). Returns `None` for anything malformed; the caller
+/// falls back to the default `192`.
+fn parse_aac_bitrate(value: &str) -> Option<u32> {
+    let trimmed = value.trim();
+    let rest = trimmed.strip_prefix("b:a")?.trim_start();
+    let numeric = rest.trim_end_matches('k').trim_end_matches('K').trim();
+    numeric.parse().ok()
 }
 
 /// Per-Episode record persisted inside `zimesub.json`. Slice 0004 never
@@ -542,6 +607,33 @@ pub fn set_selected_track(
         episode.selected_subtitle_track_id = Some(track_id);
         episode.selected_subtitle_language = language;
     }
+    write_project_json_atomic(folder, &project)?;
+    Ok(project)
+}
+
+/// Persist a new `default_extract_audio` block into `folder/zimesub.json`
+/// and return the post-write [`ProjectJson`]. Slice 0009 wires this to
+/// the Project Settings "Trích xuất audio" sub-form.
+///
+/// `config.codec` is normalised lightly: anything outside the
+/// {`libmp3lame`, `aac`, `flac`} set is coerced to `libmp3lame` so a
+/// future codec drop can't poison the manifest. `quality_or_bitrate`
+/// is preserved verbatim — the per-codec parser tolerates malformed
+/// inputs by falling back to the codec's default, and surfacing the
+/// raw string lets the UI echo it back unmodified.
+pub fn set_default_extract_audio(
+    folder: &Path,
+    config: ExtractAudioConfig,
+) -> Result<ProjectJson, ProjectError> {
+    let mut project = open_project(folder)?;
+    let normalised_codec = match config.codec.as_str() {
+        "libmp3lame" | "aac" | "flac" => config.codec.clone(),
+        _ => "libmp3lame".to_string(),
+    };
+    project.default_extract_audio = ExtractAudioConfig {
+        codec: normalised_codec,
+        quality_or_bitrate: config.quality_or_bitrate,
+    };
     write_project_json_atomic(folder, &project)?;
     Ok(project)
 }
@@ -1007,6 +1099,107 @@ mod tests {
         assert_eq!(project.episodes.len(), 1);
         assert_eq!(project.episodes[0].selected_subtitle_track_id, Some(2));
         assert!(project.episodes[0].selected_subtitle_language.is_none());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn extract_audio_config_default_resolves_mp3_args() {
+        let cfg = ExtractAudioConfig::project_default();
+        assert_eq!(cfg.output_extension(), "mp3");
+        assert_eq!(cfg.quality_args(), vec!["-q:a", "2"]);
+    }
+
+    #[test]
+    fn extract_audio_config_aac_uses_bitrate_args() {
+        let cfg = ExtractAudioConfig {
+            codec: "aac".into(),
+            quality_or_bitrate: "b:a 256k".into(),
+        };
+        assert_eq!(cfg.output_extension(), "aac");
+        assert_eq!(cfg.quality_args(), vec!["-b:a", "256k"]);
+    }
+
+    #[test]
+    fn extract_audio_config_flac_has_no_quality_args() {
+        let cfg = ExtractAudioConfig {
+            codec: "flac".into(),
+            quality_or_bitrate: "".into(),
+        };
+        assert_eq!(cfg.output_extension(), "flac");
+        assert!(cfg.quality_args().is_empty());
+    }
+
+    #[test]
+    fn extract_audio_config_falls_back_on_malformed_quality() {
+        let cfg = ExtractAudioConfig {
+            codec: "libmp3lame".into(),
+            quality_or_bitrate: "totally wrong".into(),
+        };
+        // Malformed strings → default `-q:a 2`.
+        assert_eq!(cfg.quality_args(), vec!["-q:a", "2"]);
+
+        let cfg = ExtractAudioConfig {
+            codec: "aac".into(),
+            quality_or_bitrate: "nonsense".into(),
+        };
+        assert_eq!(cfg.quality_args(), vec!["-b:a", "192k"]);
+    }
+
+    #[test]
+    fn extract_audio_config_clamps_mp3_quality_in_range() {
+        let cfg = ExtractAudioConfig {
+            codec: "libmp3lame".into(),
+            quality_or_bitrate: "q:a 11".into(),
+        };
+        // Out-of-range quality falls back to default.
+        assert_eq!(cfg.quality_args(), vec!["-q:a", "2"]);
+    }
+
+    #[test]
+    fn set_default_extract_audio_persists_and_round_trips() {
+        let dir = temp_dir_for_test("set-extract-audio");
+        create_project(&dir, "AudioCfg").expect("create");
+
+        let cfg = ExtractAudioConfig {
+            codec: "aac".into(),
+            quality_or_bitrate: "b:a 320k".into(),
+        };
+        let updated = set_default_extract_audio(&dir, cfg).expect("set");
+        assert_eq!(updated.default_extract_audio.codec, "aac");
+        assert_eq!(updated.default_extract_audio.quality_or_bitrate, "b:a 320k");
+
+        let on_disk = open_project(&dir).expect("re-open");
+        assert_eq!(on_disk.default_extract_audio.codec, "aac");
+        assert_eq!(on_disk.default_extract_audio.quality_or_bitrate, "b:a 320k");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn set_default_extract_audio_normalises_unknown_codec() {
+        let dir = temp_dir_for_test("set-extract-audio-bogus");
+        create_project(&dir, "AudioCfgBogus").expect("create");
+        let cfg = ExtractAudioConfig {
+            codec: "opus".into(),
+            quality_or_bitrate: "b:a 128k".into(),
+        };
+        let updated = set_default_extract_audio(&dir, cfg).expect("set");
+        // Anything outside {libmp3lame, aac, flac} is coerced to mp3
+        // so a future-but-unsupported codec can never block extraction.
+        assert_eq!(updated.default_extract_audio.codec, "libmp3lame");
+        assert_eq!(updated.default_extract_audio.quality_or_bitrate, "b:a 128k");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn set_default_extract_audio_errors_when_project_missing() {
+        let dir = temp_dir_for_test("set-extract-audio-no-proj");
+        let err = set_default_extract_audio(
+            &dir,
+            ExtractAudioConfig::project_default(),
+        )
+        .unwrap_err();
+        assert!(matches!(err, ProjectError::NotAProject));
         let _ = fs::remove_dir_all(&dir);
     }
 }
