@@ -58,6 +58,8 @@ const RenderPanel: Component<RenderPanelProps> = props => {
   const artifacts = () => artifactStateFor(props.episodeId)
   const hasRender = () => artifacts()?.hasRender ?? false
   const isStale = () => artifacts()?.isRenderStale ?? false
+  /** Slice 0012 — disable Render when SourceMkv has gone missing. */
+  const isSourceMissing = () => artifacts()?.isSourceMissing ?? false
 
   const isQueued = (): boolean => job().phase === 'queued'
   const isRunning = (): boolean => job().phase === 'running'
@@ -121,6 +123,8 @@ const RenderPanel: Component<RenderPanelProps> = props => {
             <Button
               variant="primary"
               onClick={() => void startRender(props.episodeId)}
+              disabled={isSourceMissing()}
+              title={isSourceMissing() ? 'MKV gốc không tìm thấy' : undefined}
               aria-label="Thử render lại"
             >
               <RotateCw size={16} strokeWidth={1.5} aria-hidden="true" />
@@ -132,6 +136,8 @@ const RenderPanel: Component<RenderPanelProps> = props => {
             <Button
               variant="primary"
               onClick={() => void startRender(props.episodeId)}
+              disabled={isSourceMissing()}
+              title={isSourceMissing() ? 'MKV gốc không tìm thấy' : undefined}
               aria-label="Bắt đầu render cho Episode này"
             >
               <Film size={16} strokeWidth={1.5} aria-hidden="true" />
@@ -291,9 +297,7 @@ const OverrideForm: Component<OverrideFormProps> = props => {
             max={100}
             step={1}
             value={quality()}
-            onInput={e =>
-              setQuality(Number.parseInt(e.currentTarget.value, 10) || 0)
-            }
+            onInput={e => setQuality(Number.parseInt(e.currentTarget.value, 10) || 0)}
             class="h-10 w-full accent-accent"
             aria-label="Chất lượng render override"
           />

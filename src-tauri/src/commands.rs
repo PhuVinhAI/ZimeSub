@@ -15,7 +15,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use serde::Serialize;
 use tauri::{AppHandle, State};
-use tracing::error;
+use tracing::{error, info, warn};
 
 use crate::ass_ops::{self, AssOpsError};
 use crate::encoder_probe::{self, Encoder, ResolvedEncoder};
@@ -28,7 +28,7 @@ use crate::mkv_probe::{self, SubtitleTrack};
 use crate::process_runner::{self, RunSpec};
 use crate::project_store::{
     self, AddEpisodesOutcome, ExtractAudioConfig, FolderInspection, ProjectJson,
-    RecentProjectStatus, RenderConfig,
+    RecentProjectStatus, RenameProjectOutcome, RenderConfig,
 };
 use crate::settings_store::{self, Settings};
 use crate::tooling::{self, RequiredTool, ToolReport};
@@ -187,6 +187,13 @@ pub fn project_create(
 /// flushing leaves an empty file behind that would otherwise be
 /// misread as a real artefact on next open). Deletions are logged at
 /// `info` and never block the open even on partial failure.
+///
+/// Slice 0012: also runs [`project_store::check_source_exists`] over
+/// every Episode and logs the missing set so a forensic readback
+/// shows which Episodes booted into the `MissingSource` overlay. The
+/// per-Episode flag is not stored on the manifest — the frontend
+/// fetches it via [`episode_inspect_artifacts`] which always
+/// re-checks the disk.
 #[tauri::command]
 pub fn project_open(state: State<'_, AppState>, folder: String) -> Result<ProjectJson, String> {
     let project_folder = Path::new(&folder);
@@ -194,6 +201,15 @@ pub fn project_open(state: State<'_, AppState>, folder: String) -> Result<Projec
     for episode in &project.episodes {
         let episode_folder = project_folder.join(&episode.folder_name);
         let _ = episode_state::clean_stale_artifacts(&episode_folder);
+    }
+    let missing = project_store::check_source_exists(&project.episodes);
+    if !missing.is_empty() {
+        info!(
+            project = %folder,
+            count = missing.len(),
+            "project_open: {} Episode(s) flagged MissingSource",
+            missing.len()
+        );
     }
     touch_recent_and_save(&state, &folder)?;
     Ok(project)
@@ -417,6 +433,12 @@ pub fn project_set_selected_track(
 /// for (`mp3` / `aac` / `flac`); the frontend uses it both to render
 /// the "audio" indicator's tooltip (`Đã có <basename>.<ext>`) and to
 /// resolve the artefact path on click-to-open later.
+///
+/// `is_source_missing` (slice 0012): `true` when the Episode's
+/// SourceMkv no longer resolves on disk. Drives the red "MKV gốc
+/// không tìm thấy" badge + disables Extract / Render buttons on the
+/// row. Translate-stage actions stay enabled because their inputs
+/// live inside the EpisodeFolder and are independent of the SourceMkv.
 #[derive(Debug, Serialize)]
 pub struct EpisodeArtifactsView {
     pub has_extracted_sub: bool,
@@ -425,6 +447,7 @@ pub struct EpisodeArtifactsView {
     pub has_translated_sub: bool,
     pub has_render: bool,
     pub is_render_stale: bool,
+    pub is_source_missing: bool,
     pub output_basename: String,
     pub audio_extension: String,
 }
@@ -434,6 +457,7 @@ impl EpisodeArtifactsView {
         inspected: EpisodeArtifacts,
         output_basename: String,
         audio_extension: String,
+        is_source_missing: bool,
     ) -> Self {
         Self {
             has_extracted_sub: inspected.has_extracted_sub,
@@ -442,6 +466,7 @@ impl EpisodeArtifactsView {
             has_translated_sub: inspected.has_translated_sub,
             has_render: inspected.has_render,
             is_render_stale: inspected.is_render_stale,
+            is_source_missing,
             output_basename,
             audio_extension,
         }
@@ -477,6 +502,7 @@ pub fn episode_inspect_artifacts(
     let episode_folder = project_folder.join(&episode.folder_name);
     let basename = episode.folder_name.clone();
     let audio_extension = project.default_extract_audio.output_extension().to_string();
+    let is_source_missing = project_store::episode_source_is_missing(episode);
     let inspected = episode_state::inspect_artifacts(
         &episode_folder,
         &basename,
@@ -486,6 +512,7 @@ pub fn episode_inspect_artifacts(
         inspected,
         basename,
         audio_extension,
+        is_source_missing,
     ))
 }
 
@@ -524,6 +551,9 @@ pub async fn extract_subtitle_start(
         .iter()
         .find(|e| e.id == episode_id)
         .ok_or_else(|| "Không tìm thấy Episode trong project".to_string())?;
+    if project_store::episode_source_is_missing(episode) {
+        return Err("MKV gốc không tìm thấy".to_string());
+    }
     let track_id = episode
         .selected_subtitle_track_id
         .ok_or_else(|| "Chưa chọn subtitle track cho Episode này".to_string())?;
@@ -605,6 +635,9 @@ pub async fn extract_audio_start(
         .iter()
         .find(|e| e.id == episode_id)
         .ok_or_else(|| "Không tìm thấy Episode trong project".to_string())?;
+    if project_store::episode_source_is_missing(episode) {
+        return Err("MKV gốc không tìm thấy".to_string());
+    }
 
     let (ffmpeg_path, mkvmerge_path) = {
         let settings = state
@@ -1074,6 +1107,9 @@ pub async fn render_start(
         .iter()
         .find(|e| e.id == episode_id)
         .ok_or_else(|| "Không tìm thấy Episode trong project".to_string())?;
+    if project_store::episode_source_is_missing(episode) {
+        return Err("MKV gốc không tìm thấy".to_string());
+    }
 
     let episode_folder = project_folder.join(&episode.folder_name);
     let translated_sub = episode_folder.join(format!("{}.vietsub.ass", episode.folder_name));
@@ -1150,5 +1186,203 @@ pub async fn render_cancel(
 ) -> Result<(), String> {
     let jobs = state.jobs(&app);
     let _ = jobs.cancel(&job_id).await;
+    Ok(())
+}
+
+/// Re-check every Episode's `source_mkv_path` on disk and return the
+/// set of ids whose file is missing. Slice 0012.
+///
+/// Drives the periodic refresh in the projects store — the frontend
+/// calls this on window-focus / project-mount so badges flip from
+/// "Trống" to "MKV gốc không tìm thấy" without forcing the user to
+/// re-open the project. The per-Episode artefact inspection already
+/// carries the same flag, but this command lets the UI run one IPC
+/// for the whole project instead of N (one per Episode).
+#[tauri::command]
+pub fn project_missing_sources(folder: String) -> Result<Vec<String>, String> {
+    let project = project_store::open_project(Path::new(&folder)).map_err(|e| e.to_string())?;
+    let missing = project_store::check_source_exists(&project.episodes);
+    Ok(missing.into_iter().collect())
+}
+
+/// Update `source_mkv_path` for one Episode after the user picks a
+/// fresh `.mkv` via the OS file picker. Slice 0012.
+///
+/// Returns the post-write [`ProjectJson`] so the frontend can swap
+/// `active` without a second `project_open` round-trip. The Episode
+/// row's overlay clears on the next artefact inspection.
+#[tauri::command]
+pub fn project_relocate_episode(
+    folder: String,
+    episode_id: String,
+    new_source_path: String,
+) -> Result<ProjectJson, String> {
+    info!(
+        project = %folder,
+        episode = %episode_id,
+        new_path = %new_source_path,
+        "lifecycle: relocate episode"
+    );
+    match project_store::relocate_episode(Path::new(&folder), &episode_id, &new_source_path) {
+        Ok(project) => {
+            info!(
+                project = %folder,
+                episode = %episode_id,
+                "lifecycle: relocate episode — ok"
+            );
+            Ok(project)
+        }
+        Err(err) => {
+            warn!(
+                project = %folder,
+                episode = %episode_id,
+                error = %err,
+                "lifecycle: relocate episode — failed"
+            );
+            Err(err.to_string())
+        }
+    }
+}
+
+/// Rename the on-disk ProjectFolder and update `name` in
+/// `zimesub.json`. Slice 0012.
+///
+/// On success, refreshes the recents MRU so the old path is dropped
+/// and the new path is stamped to the head. The frontend swaps
+/// `activeFolder` to the new path so subsequent IPC calls hit the
+/// renamed folder.
+#[tauri::command]
+pub fn project_rename(
+    state: State<'_, AppState>,
+    folder: String,
+    new_name: String,
+) -> Result<RenameProjectOutcome, String> {
+    info!(project = %folder, new_name = %new_name, "lifecycle: rename project");
+    let outcome = match project_store::rename_project(Path::new(&folder), &new_name) {
+        Ok(o) => o,
+        Err(err) => {
+            warn!(project = %folder, error = %err, "lifecycle: rename project — failed");
+            return Err(err.to_string());
+        }
+    };
+    {
+        let mut settings = state
+            .settings
+            .lock()
+            .map_err(|e| format!("settings mutex poisoned: {e}"))?;
+        settings.remove_recent_project(&folder);
+        settings.touch_recent_project(&outcome.new_folder_path, project_store::now_local_iso8601());
+        if let Err(err) = settings_store::save(&settings) {
+            error!(error = %err, "failed to persist settings.json after rename");
+        }
+    }
+    info!(
+        old_path = %folder,
+        new_path = %outcome.new_folder_path,
+        "lifecycle: rename project — ok"
+    );
+    Ok(outcome)
+}
+
+/// Delete one Episode — EpisodeFolder + json record. Slice 0012.
+///
+/// SourceMkv at the original path is never touched per ADR-0001.
+/// Cancels any in-flight jobs for this Episode first so the cleanup
+/// pass doesn't race against an active mkvextract/ffmpeg writing
+/// into the folder we're about to delete.
+#[tauri::command]
+pub async fn project_remove_episode(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    folder: String,
+    episode_id: String,
+) -> Result<ProjectJson, String> {
+    info!(project = %folder, episode = %episode_id, "lifecycle: remove episode");
+
+    // Cancel any in-flight jobs for this Episode so process tree is
+    // killed and partial output is cleaned up before we delete the
+    // folder out from under them.
+    let snapshot = state.jobs(&app).snapshot().await;
+    for job in snapshot.jobs.iter() {
+        if job.episode_id == episode_id
+            && (job.status == crate::job_queue::JobStatus::Pending
+                || job.status == crate::job_queue::JobStatus::Running)
+        {
+            let _ = state.jobs(&app).cancel(&job.id).await;
+        }
+    }
+
+    match project_store::remove_episode(Path::new(&folder), &episode_id) {
+        Ok(project) => {
+            info!(
+                project = %folder,
+                episode = %episode_id,
+                "lifecycle: remove episode — ok"
+            );
+            Ok(project)
+        }
+        Err(err) => {
+            warn!(
+                project = %folder,
+                episode = %episode_id,
+                error = %err,
+                "lifecycle: remove episode — failed"
+            );
+            Err(err.to_string())
+        }
+    }
+}
+
+/// Delete the entire project — recursively removes the ProjectFolder
+/// and drops the entry from `recent_projects`. Slice 0012.
+///
+/// SourceMkv files outside the project folder are never touched per
+/// ADR-0001. Cancels every in-flight job belonging to this project
+/// first so no subprocess is left writing into a folder that is
+/// about to be wiped.
+///
+/// The frontend's confirm flow enforces "type the project name
+/// verbatim" before letting the destructive button fire; this
+/// command trusts the caller and deletes whatever is at `folder`.
+#[tauri::command]
+pub async fn project_delete(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    folder: String,
+) -> Result<(), String> {
+    info!(project = %folder, "lifecycle: delete project");
+
+    let project_folder = Path::new(&folder);
+
+    // Cancel every job whose project_folder matches (case-insensitive,
+    // because Windows paths can vary in casing across IPC traversals).
+    let normalised_folder = folder.to_lowercase();
+    let snapshot = state.jobs(&app).snapshot().await;
+    for job in snapshot.jobs.iter() {
+        if job.project_folder.to_lowercase() == normalised_folder
+            && (job.status == crate::job_queue::JobStatus::Pending
+                || job.status == crate::job_queue::JobStatus::Running)
+        {
+            let _ = state.jobs(&app).cancel(&job.id).await;
+        }
+    }
+
+    if let Err(err) = project_store::delete_project(project_folder) {
+        warn!(project = %folder, error = %err, "lifecycle: delete project — failed");
+        return Err(err.to_string());
+    }
+
+    {
+        let mut settings = state
+            .settings
+            .lock()
+            .map_err(|e| format!("settings mutex poisoned: {e}"))?;
+        settings.remove_recent_project(&folder);
+        if let Err(err) = settings_store::save(&settings) {
+            error!(error = %err, "failed to persist settings.json after delete");
+        }
+    }
+
+    info!(project = %folder, "lifecycle: delete project — ok");
     Ok(())
 }

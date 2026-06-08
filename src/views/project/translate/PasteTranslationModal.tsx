@@ -58,9 +58,7 @@ const PasteTranslationModal: Component<PasteTranslationModalProps> = props => {
     try {
       await episodeWriteTranslated(props.folder, props.episodeId, body, overwrite)
       await refreshArtifactsForEpisode(props.episodeId)
-      pushAccentToast(
-        overwrite ? 'Đã ghi đè vietsub.ass' : 'Đã lưu vietsub.ass'
-      )
+      pushAccentToast(overwrite ? 'Đã ghi đè vietsub.ass' : 'Đã lưu vietsub.ass')
       props.onClose()
     } catch (err) {
       const message = messageOf(err)
@@ -137,7 +135,11 @@ const PasteTranslationModal: Component<PasteTranslationModalProps> = props => {
           file <code class="font-mono">{targetFilename()}</code> vào EpisodeFolder.
         </p>
 
-        <Show when={showOverwriteBanner() && artifactStateFor(props.episodeId)?.hasTranslatedSub}>
+        <Show
+          when={
+            showOverwriteBanner() && artifactStateFor(props.episodeId)?.hasTranslatedSub
+          }
+        >
           <div
             class="border-2 border-warn bg-bg px-3 py-2 font-mono text-xs text-warn"
             role="alert"

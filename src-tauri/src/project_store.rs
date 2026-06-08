@@ -31,6 +31,27 @@
 //!    `zimesub.json`. Returns the post-write `ProjectJson` so the
 //!    frontend can swap `active` without a second `project_open`
 //!    round-trip.
+//!
+//! Slice 0012 adds the project-lifecycle operations that protect the
+//! user from data loss and broken state:
+//!  * [`check_source_exists`] — pure function over `(project_folder,
+//!    episodes)` that returns the subset of episode ids whose
+//!    `source_mkv_path` no longer resolves on disk. Drives the
+//!    `MissingSource` overlay on Project open and as a preflight
+//!    check before enqueueing any pipeline Job.
+//!  * [`relocate_episode`] — rewrite `source_mkv_path` for a single
+//!    Episode after the user picks a fresh `.mkv` via the OS picker.
+//!  * [`rename_project`] — rename the on-disk ProjectFolder
+//!    (`std::fs::rename`) and update the `name` field in
+//!    `zimesub.json`. The folder rename runs first so a permission /
+//!    in-use failure leaves the json untouched and the user sees the
+//!    OS-level error.
+//!  * [`remove_episode`] — delete one EpisodeFolder + drop the matching
+//!    record from the `episodes` array. SourceMkv at original path is
+//!    never touched per ADR-0001.
+//!  * [`delete_project`] — recursively remove the ProjectFolder
+//!    contents. Same ADR-0001 guarantee for SourceMkv files outside
+//!    the project folder.
 
 use std::fs;
 use std::io;
@@ -743,6 +764,189 @@ pub fn now_local_iso8601() -> String {
     Local::now().to_rfc3339_opts(SecondsFormat::Secs, false)
 }
 
+/// Return the subset of `episode_ids` whose `source_mkv_path` no longer
+/// resolves on disk. Slice 0012.
+///
+/// Pure I/O over the [`EpisodeRecord::source_mkv_path`] strings — a
+/// single `Path::is_file` per episode. The result is a HashSet so the
+/// commands layer can do constant-time membership checks when
+/// decorating the per-Episode artefacts view.
+///
+/// `MissingSource` is keyed by the source file, NOT the EpisodeFolder
+/// inside the project — ADR-0001 says SourceMkv files live outside the
+/// project folder (path-only reference). A missing EpisodeFolder is a
+/// separate failure mode (the artefact cache reports its own empty
+/// state); deleting the SourceMkv leaves the artefacts inside the
+/// project intact and the user can still translate / paste back.
+pub fn check_source_exists(episodes: &[EpisodeRecord]) -> std::collections::HashSet<String> {
+    let mut missing = std::collections::HashSet::new();
+    for ep in episodes {
+        let path = Path::new(&ep.source_mkv_path);
+        if !path.is_file() {
+            missing.insert(ep.id.clone());
+        }
+    }
+    missing
+}
+
+/// `true` when this Episode's SourceMkv no longer resolves on disk —
+/// used by the pipeline preflight before enqueueing an Extract* /
+/// Render Job. Single-episode form of [`check_source_exists`].
+pub fn episode_source_is_missing(episode: &EpisodeRecord) -> bool {
+    !Path::new(&episode.source_mkv_path).is_file()
+}
+
+/// Update `source_mkv_path` for one Episode. Slice 0012.
+///
+/// The frontend reaches this command after the user picks a fresh
+/// `.mkv` via the OS file picker on a `MissingSource` Episode. The
+/// manifest is rewritten atomically (`tmp + rename`) regardless of
+/// whether the path actually changed — keeps the write semantics
+/// consistent with every other mutator in this module.
+///
+/// Errors:
+///  * `ProjectError::NotAProject` — `folder/zimesub.json` missing.
+///  * `ProjectError::EpisodeNotFound` — id not in `episodes`.
+///  * `ProjectError::Io` — read/write/rename failed.
+pub fn relocate_episode(
+    folder: &Path,
+    episode_id: &str,
+    new_source_path: &str,
+) -> Result<ProjectJson, ProjectError> {
+    let mut project = open_project(folder)?;
+    {
+        let episode = project
+            .episodes
+            .iter_mut()
+            .find(|e| e.id == episode_id)
+            .ok_or(ProjectError::EpisodeNotFound)?;
+        episode.source_mkv_path = new_source_path.to_string();
+    }
+    write_project_json_atomic(folder, &project)?;
+    Ok(project)
+}
+
+/// Outcome of [`rename_project`].
+///
+/// `new_folder_path` is the absolute new path on disk after the
+/// successful rename — the commands layer feeds this back into
+/// settings (touch recents, drop the old entry) and the frontend
+/// updates `activeFolder` to point at the renamed folder so the
+/// path label in the header reflects reality.
+#[derive(Clone, Debug, Serialize)]
+pub struct RenameProjectOutcome {
+    pub project: ProjectJson,
+    pub new_folder_path: String,
+}
+
+/// Rename the on-disk ProjectFolder and update `name` in
+/// `zimesub.json`. Slice 0012.
+///
+/// Order matters: the folder rename runs first because that's the
+/// operation most likely to fail (in-use lock, permission denied,
+/// destination already exists). On failure the json is NOT touched —
+/// the user sees the raw OS error and the project is unchanged.
+///
+/// `new_name` is sanitised through [`sanitize_folder_name`] before
+/// being used as the new folder name on disk. If the sanitised result
+/// equals the current folder name (e.g. only whitespace changed) we
+/// skip the rename and just rewrite the json so the new display name
+/// takes effect.
+pub fn rename_project(
+    current_folder: &Path,
+    new_name: &str,
+) -> Result<RenameProjectOutcome, ProjectError> {
+    let trimmed_name = new_name.trim();
+    if trimmed_name.is_empty() {
+        return Err(ProjectError::NameEmpty);
+    }
+
+    let mut project = open_project(current_folder)?;
+
+    let sanitised = sanitize_folder_name(trimmed_name);
+    let current_name = current_folder
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
+
+    let target_folder = if sanitised != current_name {
+        let parent = current_folder
+            .parent()
+            .ok_or_else(|| ProjectError::Io(io::Error::other("Không xác định được thư mục cha")))?;
+        let candidate = parent.join(&sanitised);
+        if candidate.exists() {
+            return Err(ProjectError::Io(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "Thư mục đích đã tồn tại",
+            )));
+        }
+        fs::rename(current_folder, &candidate)?;
+        candidate
+    } else {
+        current_folder.to_path_buf()
+    };
+
+    project.name = trimmed_name.to_string();
+    write_project_json_atomic(&target_folder, &project)?;
+
+    Ok(RenameProjectOutcome {
+        project,
+        new_folder_path: target_folder.to_string_lossy().into_owned(),
+    })
+}
+
+/// Remove one Episode from the project — deletes the on-disk
+/// EpisodeFolder and drops the matching record from `episodes`.
+/// Slice 0012.
+///
+/// The SourceMkv at the original path is never touched, per ADR-0001
+/// (path-only reference). When the EpisodeFolder is already gone we
+/// still drop the json record so a project that survived an external
+/// `rm -rf` ends up self-consistent.
+pub fn remove_episode(
+    folder: &Path,
+    episode_id: &str,
+) -> Result<ProjectJson, ProjectError> {
+    let mut project = open_project(folder)?;
+    let index = project
+        .episodes
+        .iter()
+        .position(|e| e.id == episode_id)
+        .ok_or(ProjectError::EpisodeNotFound)?;
+    let episode = project.episodes.remove(index);
+    let episode_folder = folder.join(&episode.folder_name);
+    if episode_folder.is_dir()
+        && let Err(err) = fs::remove_dir_all(&episode_folder)
+    {
+        // Surface the IO error to the caller, but the json mutation
+        // already happened in memory. Re-add the entry so caller's
+        // re-open still finds it; the user sees the OS-level error
+        // and the project state on disk matches what the user sees.
+        project.episodes.insert(index, episode);
+        return Err(ProjectError::Io(err));
+    }
+    write_project_json_atomic(folder, &project)?;
+    Ok(project)
+}
+
+/// Recursively remove the ProjectFolder contents. Slice 0012.
+///
+/// SourceMkv files outside the project folder are never touched per
+/// ADR-0001. The PRD's "strong confirm" lives on the frontend (modal
+/// requires typing the project name verbatim) — the backend trusts
+/// the caller and recursively removes whatever is at `folder`.
+///
+/// Returns `Ok(())` even when the folder is already gone — the
+/// frontend's confirm flow may race with an external Explorer delete
+/// and the user expects "Xoá" to succeed in that case.
+pub fn delete_project(folder: &Path) -> Result<(), ProjectError> {
+    if !folder.exists() {
+        return Ok(());
+    }
+    fs::remove_dir_all(folder)?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1275,5 +1479,180 @@ mod tests {
         .unwrap_err();
         assert!(matches!(err, ProjectError::NotAProject));
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn check_source_exists_flags_missing_files() {
+        let dir = temp_dir_for_test("check-source-missing");
+        create_project(&dir, "MissingTest").expect("create");
+
+        let existing = dir.join("real.mkv");
+        fs::write(&existing, b"mkv").expect("write");
+        let missing = dir.join("ghost.mkv"); // never created
+
+        let inputs = vec![
+            existing.to_string_lossy().into_owned(),
+            missing.to_string_lossy().into_owned(),
+        ];
+        let outcome = add_episodes(&dir, &inputs).expect("add");
+        let missing_ids = check_source_exists(&outcome.project.episodes);
+        assert_eq!(missing_ids.len(), 1);
+        assert!(missing_ids.contains(&outcome.project.episodes[1].id));
+        assert!(!missing_ids.contains(&outcome.project.episodes[0].id));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn check_source_exists_returns_empty_when_all_present() {
+        let dir = temp_dir_for_test("check-source-all-ok");
+        create_project(&dir, "AllOkTest").expect("create");
+        let one = dir.join("one.mkv");
+        let two = dir.join("two.mkv");
+        fs::write(&one, b"mkv").expect("write");
+        fs::write(&two, b"mkv").expect("write");
+        let outcome = add_episodes(
+            &dir,
+            &[
+                one.to_string_lossy().into_owned(),
+                two.to_string_lossy().into_owned(),
+            ],
+        )
+        .expect("add");
+        let missing_ids = check_source_exists(&outcome.project.episodes);
+        assert!(missing_ids.is_empty());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn relocate_episode_updates_source_path() {
+        let dir = temp_dir_for_test("relocate-happy");
+        create_project(&dir, "RelocateTest").expect("create");
+        let inputs = vec!["C:\\Anime\\Show - 04.mkv".to_string()];
+        let outcome = add_episodes(&dir, &inputs).expect("add");
+        let ep_id = outcome.project.episodes[0].id.clone();
+
+        let new_path = "D:\\Anime\\Show - 04.mkv";
+        let updated = relocate_episode(&dir, &ep_id, new_path).expect("relocate");
+        assert_eq!(updated.episodes[0].source_mkv_path, new_path);
+
+        let on_disk = open_project(&dir).expect("re-open");
+        assert_eq!(on_disk.episodes[0].source_mkv_path, new_path);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn relocate_episode_errors_when_episode_missing() {
+        let dir = temp_dir_for_test("relocate-missing");
+        create_project(&dir, "RelocateMissing").expect("create");
+        let err = relocate_episode(&dir, "no-such-id", "C:\\new.mkv").unwrap_err();
+        assert!(matches!(err, ProjectError::EpisodeNotFound));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn rename_project_renames_folder_and_updates_name() {
+        let dir = temp_dir_for_test("rename-happy");
+        create_project(&dir, "OldName").expect("create");
+        let outcome = rename_project(&dir, "NewName").expect("rename");
+        let new_folder = Path::new(&outcome.new_folder_path);
+        assert!(new_folder.is_dir());
+        assert!(!dir.exists());
+        assert_eq!(outcome.project.name, "NewName");
+
+        let on_disk = open_project(new_folder).expect("re-open");
+        assert_eq!(on_disk.name, "NewName");
+        let _ = fs::remove_dir_all(new_folder);
+    }
+
+    #[test]
+    fn rename_project_rejects_empty_name() {
+        let dir = temp_dir_for_test("rename-empty");
+        create_project(&dir, "X").expect("create");
+        let err = rename_project(&dir, "   ").unwrap_err();
+        assert!(matches!(err, ProjectError::NameEmpty));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn rename_project_only_updates_name_when_folder_name_unchanged() {
+        let dir = temp_dir_for_test("rename-same-folder");
+        // Project folder has whatever random temp suffix — renaming to
+        // the same sanitised name would clash on Windows; we test the
+        // "only the display name changed, folder is identical" case
+        // explicitly by passing the current folder's basename verbatim.
+        create_project(&dir, "Initial").expect("create");
+        let same_basename = dir.file_name().unwrap().to_string_lossy().into_owned();
+        let outcome = rename_project(&dir, &same_basename).expect("rename");
+        // Folder path is unchanged…
+        assert_eq!(outcome.new_folder_path, dir.to_string_lossy());
+        // …but the json's `name` is updated to the new display name.
+        assert_eq!(outcome.project.name, same_basename);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn remove_episode_drops_record_and_deletes_folder() {
+        let dir = temp_dir_for_test("remove-episode-happy");
+        create_project(&dir, "RemoveTest").expect("create");
+        let inputs = vec!["C:\\Anime\\Episode - 05.mkv".to_string()];
+        let outcome = add_episodes(&dir, &inputs).expect("add");
+        let ep_id = outcome.project.episodes[0].id.clone();
+        let episode_folder = dir.join(&outcome.project.episodes[0].folder_name);
+        assert!(episode_folder.is_dir());
+
+        let updated = remove_episode(&dir, &ep_id).expect("remove");
+        assert!(updated.episodes.is_empty());
+        assert!(!episode_folder.exists());
+
+        let on_disk = open_project(&dir).expect("re-open");
+        assert!(on_disk.episodes.is_empty());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn remove_episode_errors_when_id_unknown() {
+        let dir = temp_dir_for_test("remove-episode-missing");
+        create_project(&dir, "RemoveMissing").expect("create");
+        let err = remove_episode(&dir, "no-such").unwrap_err();
+        assert!(matches!(err, ProjectError::EpisodeNotFound));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn remove_episode_succeeds_when_folder_already_gone() {
+        // The user nuked the EpisodeFolder via Explorer between
+        // launches. ZimeSub should still happily drop the json entry
+        // so the project ends up self-consistent.
+        let dir = temp_dir_for_test("remove-episode-folder-gone");
+        create_project(&dir, "FolderGoneTest").expect("create");
+        let inputs = vec!["C:\\Anime\\Episode - 06.mkv".to_string()];
+        let outcome = add_episodes(&dir, &inputs).expect("add");
+        let ep_id = outcome.project.episodes[0].id.clone();
+        let episode_folder = dir.join(&outcome.project.episodes[0].folder_name);
+        fs::remove_dir_all(&episode_folder).expect("preemptive rm");
+
+        let updated = remove_episode(&dir, &ep_id).expect("remove");
+        assert!(updated.episodes.is_empty());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn delete_project_recursively_removes_project_folder() {
+        let dir = temp_dir_for_test("delete-project-happy");
+        create_project(&dir, "DeleteTest").expect("create");
+        let inputs = vec!["C:\\Anime\\Episode - 07.mkv".to_string()];
+        add_episodes(&dir, &inputs).expect("add");
+        assert!(dir.is_dir());
+
+        delete_project(&dir).expect("delete");
+        assert!(!dir.exists());
+    }
+
+    #[test]
+    fn delete_project_succeeds_when_folder_already_missing() {
+        let dir = temp_dir_for_test("delete-project-missing");
+        // Folder never existed.
+        let phantom = dir.join("never-existed");
+        delete_project(&phantom).expect("delete");
     }
 }

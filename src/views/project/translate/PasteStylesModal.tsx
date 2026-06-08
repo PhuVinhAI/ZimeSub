@@ -3,7 +3,14 @@ import Button from '@design-system/Button'
 import Modal from '@design-system/Modal'
 import { pushAccentToast, pushDangerToast } from '@lib/toast/toastStore'
 import { refreshArtifactsForEpisode } from '@stores/jobs'
-import { createEffect, createMemo, createSignal, on, Show, type Component } from 'solid-js'
+import {
+  createEffect,
+  createMemo,
+  createSignal,
+  on,
+  Show,
+  type Component
+} from 'solid-js'
 
 /**
  * Paste-styles modal — "Dán [V4+ Styles]" button. Slice 0010 AC 4.
@@ -153,10 +160,10 @@ const PasteStylesModal: Component<PasteStylesModalProps> = props => {
     >
       <div class="flex flex-col gap-4">
         <p class="text-sm text-text">
-          Dán nội dung section <code class="font-mono">[V4+ Styles]</code> đã chỉnh sửa
-          từ Aegisub/AI. ZimeSub sẽ thay thế đúng section này trong
-          <code class="ml-1 font-mono">{targetFilename()}</code> và giữ nguyên các
-          section khác.
+          Dán nội dung section <code class="font-mono">[V4+ Styles]</code> đã chỉnh sửa từ
+          Aegisub/AI. ZimeSub sẽ thay thế đúng section này trong
+          <code class="ml-1 font-mono">{targetFilename()}</code> và giữ nguyên các section
+          khác.
         </p>
 
         <Show when={showError()}>

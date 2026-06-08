@@ -42,3 +42,20 @@ export async function pickMkvFiles(title: string): Promise<string[]> {
   if (Array.isArray(result)) return result
   return [result]
 }
+
+/**
+ * Show the OS single-file picker filtered to `.mkv`. Returns the
+ * absolute path the user selected or `null` when they dismiss. Used
+ * by the `Relocate…` button on a `MissingSource` Episode (slice 0012).
+ */
+export async function pickSingleMkv(title: string): Promise<string | null> {
+  const result = await pluginOpen({
+    directory: false,
+    multiple: false,
+    title,
+    filters: [{ name: 'MKV video', extensions: ['mkv'] }]
+  })
+  if (result === null) return null
+  if (typeof result === 'string') return result
+  return null
+}

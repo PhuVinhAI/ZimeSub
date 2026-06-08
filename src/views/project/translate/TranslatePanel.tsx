@@ -8,11 +8,11 @@ import {
   type EpisodeArtifactState
 } from '@stores/jobs'
 import { projectsStore } from '@stores/projects'
-import { ClipboardPaste, FileText, FolderOpen, Palette } from 'lucide-solid'
-import { createSignal, Show, type Component } from 'solid-js'
 import DraftOverwriteConfirmModal from '@views/project/translate/DraftOverwriteConfirmModal'
 import PasteStylesModal from '@views/project/translate/PasteStylesModal'
 import PasteTranslationModal from '@views/project/translate/PasteTranslationModal'
+import { ClipboardPaste, FileText, FolderOpen, Palette } from 'lucide-solid'
+import { createSignal, Show, type Component } from 'solid-js'
 
 interface TranslatePanelProps {
   episodeId: string
@@ -62,10 +62,16 @@ const TranslatePanel: Component<TranslatePanelProps> = props => {
 
   const runMakeDraft = async (overwrite: boolean): Promise<void> => {
     try {
-      const outcome = await episodeMakeTranslationDraft(folder(), props.episodeId, overwrite)
+      const outcome = await episodeMakeTranslationDraft(
+        folder(),
+        props.episodeId,
+        overwrite
+      )
       await refreshArtifactsForEpisode(props.episodeId)
       pushAccentToast(
-        outcome.existed_before ? 'Đã ghi đè bản nháp .ass.txt' : 'Đã tạo bản nháp .ass.txt'
+        outcome.existed_before
+          ? 'Đã ghi đè bản nháp .ass.txt'
+          : 'Đã tạo bản nháp .ass.txt'
       )
     } catch (err) {
       const message = messageOf(err)

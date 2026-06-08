@@ -179,3 +179,96 @@ export async function projectSetExtractAudioConfig(
     config
   })
 }
+
+/**
+ * Return the set of Episode ids whose `source_mkv_path` no longer
+ * resolves on disk. Slice 0012.
+ *
+ * Drives the periodic refresh in the projects store — the frontend
+ * calls this on window-focus / project-mount so the red "MKV gốc
+ * không tìm thấy" badge flips on without forcing the user to re-open
+ * the project.
+ */
+export async function projectMissingSources(folder: string): Promise<string[]> {
+  return invoke<string[]>('project_missing_sources', { folder })
+}
+
+/**
+ * Update `source_mkv_path` for one Episode after the user picks a
+ * fresh `.mkv` via the OS file picker on a `MissingSource` overlay.
+ * Slice 0012. Returns the post-write project so `active` swaps
+ * without a second `project_open` round-trip.
+ */
+export async function projectRelocateEpisode(
+  folder: string,
+  episodeId: string,
+  newSourcePath: string
+): Promise<ProjectJson> {
+  return invoke<ProjectJson>('project_relocate_episode', {
+    folder,
+    episodeId,
+    newSourcePath
+  })
+}
+
+/**
+ * Result of [`projectRename`]. Mirrors `project_store::RenameProjectOutcome`.
+ *
+ * `new_folder_path` is the absolute new path on disk after the
+ * successful rename. The frontend uses this to update `activeFolder`
+ * so subsequent IPC calls hit the renamed folder.
+ */
+export interface RenameProjectOutcome {
+  project: ProjectJson
+  new_folder_path: string
+}
+
+/**
+ * Rename the on-disk ProjectFolder and update `name` in
+ * `zimesub.json`. Slice 0012.
+ *
+ * Backend renames the folder first; on failure the json is left
+ * untouched and the user sees the raw OS error. On success the
+ * recents MRU is refreshed (old path dropped, new path stamped).
+ */
+export async function projectRename(
+  folder: string,
+  newName: string
+): Promise<RenameProjectOutcome> {
+  return invoke<RenameProjectOutcome>('project_rename', {
+    folder,
+    newName
+  })
+}
+
+/**
+ * Delete one Episode — EpisodeFolder + json record. SourceMkv at
+ * original path is never touched per ADR-0001. Slice 0012.
+ *
+ * Backend cancels any in-flight jobs for this Episode first so the
+ * cleanup pass doesn't race against an active mkvextract/ffmpeg
+ * writing into the folder we're about to delete.
+ */
+export async function projectRemoveEpisode(
+  folder: string,
+  episodeId: string
+): Promise<ProjectJson> {
+  return invoke<ProjectJson>('project_remove_episode', {
+    folder,
+    episodeId
+  })
+}
+
+/**
+ * Delete the entire project — recursively removes the ProjectFolder
+ * and drops the entry from `recent_projects`. SourceMkv files
+ * outside the project folder are never touched per ADR-0001.
+ * Slice 0012.
+ *
+ * The frontend's confirm flow enforces "type the project name
+ * verbatim" before letting the destructive button fire; the
+ * backend trusts the caller.
+ */
+export async function projectDelete(folder: string): Promise<void> {
+  return invoke<void>('project_delete', { folder })
+}

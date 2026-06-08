@@ -98,9 +98,7 @@ const ProjectSettingsModal: Component<ProjectSettingsModalProps> = props => {
       if (outcome.available_encoders.length === 0) {
         pushDangerToast('Không phát hiện encoder H.264 nào từ ffmpeg.')
       } else {
-        pushAccentToast(
-          `Đã phát hiện ${outcome.available_encoders.length} encoder.`
-        )
+        pushAccentToast(`Đã phát hiện ${outcome.available_encoders.length} encoder.`)
       }
     } catch (err) {
       pushDangerToast(err instanceof Error ? err.message : String(err))
@@ -305,9 +303,7 @@ const ProjectSettingsModal: Component<ProjectSettingsModalProps> = props => {
                 <select
                   id="render-encoder"
                   value={encoder()}
-                  onChange={e =>
-                    setEncoder(e.currentTarget.value as EncoderChoice)
-                  }
+                  onChange={e => setEncoder(e.currentTarget.value as EncoderChoice)}
                   class="h-11 border-2 border-border bg-bg px-3 font-mono text-sm text-text outline-none focus:border-accent"
                   aria-label="Encoder hardware/CPU"
                 >
@@ -331,8 +327,8 @@ const ProjectSettingsModal: Component<ProjectSettingsModalProps> = props => {
                   Chất lượng: {renderQuality()}
                 </label>
                 <p class="text-xs text-text-muted">
-                  0 = nhỏ/nhanh nhất, 100 = chất lượng cao nhất. Map theo từng
-                  encoder (QSV/NVENC/libx264 = số 28→18; AMF = speed/balanced/quality).
+                  0 = nhỏ/nhanh nhất, 100 = chất lượng cao nhất. Map theo từng encoder
+                  (QSV/NVENC/libx264 = số 28→18; AMF = speed/balanced/quality).
                 </p>
                 <input
                   id="render-quality"
@@ -342,9 +338,7 @@ const ProjectSettingsModal: Component<ProjectSettingsModalProps> = props => {
                   step={1}
                   value={renderQuality()}
                   onInput={e =>
-                    setRenderQuality(
-                      Number.parseInt(e.currentTarget.value, 10) || 0
-                    )
+                    setRenderQuality(Number.parseInt(e.currentTarget.value, 10) || 0)
                   }
                   class="h-11 w-full accent-accent"
                   aria-label="Chất lượng render"

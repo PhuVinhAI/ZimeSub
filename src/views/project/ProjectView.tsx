@@ -1,4 +1,4 @@
-import { pickMkvFiles } from '@api/dialog'
+import { pickMkvFiles, pickSingleMkv } from '@api/dialog'
 import type { EpisodeRecord, ProjectJson } from '@api/projects'
 import Button from '@design-system/Button'
 import ProgressBar from '@design-system/ProgressBar'
@@ -9,6 +9,7 @@ import {
   cancelExtractSubtitle,
   clearJobState,
   jobStateFor,
+  refreshArtifactsForEpisode,
   rememberDontAskAudioOverwrite,
   rememberDontAskOverwrite,
   shouldConfirmAudioOverwrite,
@@ -17,23 +18,30 @@ import {
   startExtractSubtitle,
   type EpisodeJobState
 } from '@stores/jobs'
-import { addEpisodes } from '@stores/projects'
+import { addEpisodes, relocateEpisode } from '@stores/projects'
 import AudioOverwriteConfirmModal from '@views/project/AudioOverwriteConfirmModal'
+import DeleteProjectModal from '@views/project/DeleteProjectModal'
 import ExtractConfirmModal from '@views/project/ExtractConfirmModal'
 import ExtractErrorModal from '@views/project/ExtractErrorModal'
 import ProjectSettingsModal from '@views/project/ProjectSettingsModal'
+import RemoveEpisodeModal from '@views/project/RemoveEpisodeModal'
+import RenameProjectModal from '@views/project/RenameProjectModal'
 import RenderPanel from '@views/project/render/RenderPanel'
 import TranslatePanel from '@views/project/translate/TranslatePanel'
 import TrackPickerModal from '@views/track-picker/TrackPickerModal'
 import {
   AudioLines,
   FilePlus2,
+  FolderInput,
   Loader2,
+  MoreVertical,
   Music2,
+  Pencil,
   Plus,
   RotateCw,
   Scissors,
-  Settings
+  Settings,
+  Trash2
 } from 'lucide-solid'
 import { createSignal, For, Show, type Component } from 'solid-js'
 
@@ -77,6 +85,12 @@ const ProjectView: Component<ProjectViewProps> = props => {
   const [errorEpisode, setErrorEpisode] = createSignal<EpisodeRecord | null>(null)
   /** Drives the project-level settings modal (audio sub-form). */
   const [projectSettingsOpen, setProjectSettingsOpen] = createSignal(false)
+  /** Drives RenameProjectModal — slice 0012. */
+  const [renameOpen, setRenameOpen] = createSignal(false)
+  /** Drives DeleteProjectModal — slice 0012. */
+  const [deleteOpen, setDeleteOpen] = createSignal(false)
+  /** Drives RemoveEpisodeModal — non-null when the user clicked "Xoá" on a row. */
+  const [removeEpisode, setRemoveEpisode] = createSignal<EpisodeRecord | null>(null)
 
   const handlePickFiles = async (): Promise<void> => {
     if (picking()) return
@@ -152,6 +166,24 @@ const ProjectView: Component<ProjectViewProps> = props => {
     setErrorEpisode(null)
   }
 
+  /**
+   * Open the `.mkv` file picker for a `MissingSource` Episode and
+   * persist the new path. Slice 0012. After the backend writes the
+   * new path, we re-inspect the row's artefacts so the overlay
+   * clears the moment the file exists at the new location.
+   */
+  const handleRelocate = async (episode: EpisodeRecord): Promise<void> => {
+    const newPath = await pickSingleMkv(`Chọn file MKV mới cho "${episode.folder_name}"`)
+    if (!newPath) return
+    try {
+      await relocateEpisode(episode.id, newPath)
+      await refreshArtifactsForEpisode(episode.id)
+    } catch {
+      // The store already surfaced the toast — swallow here so the
+      // void-returning event handler doesn't reject upstream.
+    }
+  }
+
   return (
     <section
       class="flex h-full w-full flex-col overflow-auto px-12 py-10"
@@ -162,14 +194,33 @@ const ProjectView: Component<ProjectViewProps> = props => {
           <h1 class="text-5xl font-semibold tracking-tight text-text">
             {props.project.name}
           </h1>
-          <Button
-            variant="secondary"
-            onClick={() => setProjectSettingsOpen(true)}
-            aria-label="Mở cấu hình project"
-          >
-            <Settings size={18} strokeWidth={1.5} aria-hidden="true" />
-            <span>Cấu hình</span>
-          </Button>
+          <div class="flex flex-none items-center gap-2">
+            <Button
+              variant="secondary"
+              onClick={() => setRenameOpen(true)}
+              aria-label="Đổi tên project"
+            >
+              <Pencil size={18} strokeWidth={1.5} aria-hidden="true" />
+              <span>Đổi tên</span>
+            </Button>
+            <Button
+              variant="secondary"
+              onClick={() => setProjectSettingsOpen(true)}
+              aria-label="Mở cấu hình project"
+            >
+              <Settings size={18} strokeWidth={1.5} aria-hidden="true" />
+              <span>Cấu hình</span>
+            </Button>
+            <Button
+              variant="secondary"
+              onClick={() => setDeleteOpen(true)}
+              aria-label="Xoá project"
+              class="text-danger hover:text-danger"
+            >
+              <Trash2 size={18} strokeWidth={1.5} aria-hidden="true" />
+              <span>Xoá project</span>
+            </Button>
+          </div>
         </div>
         <p class="font-mono text-xs break-all text-text-muted">{props.folder}</p>
       </header>
@@ -203,6 +254,8 @@ const ProjectView: Component<ProjectViewProps> = props => {
                   onShowError={() => setErrorEpisode(episode)}
                   onExtractAudio={() => handleAudioExtractRequest(episode)}
                   onCancelAudio={() => void cancelExtractAudio(episode.id)}
+                  onRelocate={() => void handleRelocate(episode)}
+                  onRemove={() => setRemoveEpisode(episode)}
                 />
               )}
             </For>
@@ -251,6 +304,26 @@ const ProjectView: Component<ProjectViewProps> = props => {
         open={projectSettingsOpen()}
         onClose={() => setProjectSettingsOpen(false)}
       />
+
+      <RenameProjectModal
+        open={renameOpen()}
+        currentName={props.project.name}
+        onClose={() => setRenameOpen(false)}
+      />
+
+      <DeleteProjectModal
+        open={deleteOpen()}
+        projectName={props.project.name}
+        folder={props.folder}
+        onClose={() => setDeleteOpen(false)}
+      />
+
+      <RemoveEpisodeModal
+        open={removeEpisode() !== null}
+        episodeName={removeEpisode()?.folder_name ?? ''}
+        episodeId={removeEpisode()?.id ?? ''}
+        onClose={() => setRemoveEpisode(null)}
+      />
     </section>
   )
 }
@@ -264,6 +337,8 @@ interface EpisodeRowProps {
   onShowError: () => void
   onExtractAudio: () => void
   onCancelAudio: () => void
+  onRelocate: () => void
+  onRemove: () => void
 }
 
 /**
@@ -292,6 +367,9 @@ const EpisodeRow: Component<EpisodeRowProps> = props => {
     artifactStateFor(props.episode.id)?.hasExtractedAudio ?? false
   const hasTranslatedSub = (): boolean =>
     artifactStateFor(props.episode.id)?.hasTranslatedSub ?? false
+  /** Slice 0012 — drives the red badge + disables Extract / Render. */
+  const isSourceMissing = (): boolean =>
+    artifactStateFor(props.episode.id)?.isSourceMissing ?? false
 
   const isSubQueued = (): boolean => subJob().phase === 'queued'
   const isSubRunning = (): boolean => subJob().phase === 'running'
@@ -302,6 +380,8 @@ const EpisodeRow: Component<EpisodeRowProps> = props => {
   const isAudioRunning = (): boolean => audioJob().phase === 'running'
   const isAudioFailed = (): boolean => audioJob().phase === 'failed'
   const isAudioInFlight = (): boolean => isAudioQueued() || isAudioRunning()
+
+  const [menuOpen, setMenuOpen] = createSignal(false)
 
   return (
     <li
@@ -324,6 +404,19 @@ const EpisodeRow: Component<EpisodeRowProps> = props => {
           >
             {props.episode.source_mkv_path}
           </span>
+          <Show when={isSourceMissing()}>
+            <div class="mt-1 flex items-center gap-2">
+              <StatusBadge tone="danger">MKV gốc không tìm thấy</StatusBadge>
+              <Button
+                variant="secondary"
+                onClick={() => props.onRelocate()}
+                aria-label="Chọn lại file MKV gốc"
+              >
+                <FolderInput size={16} strokeWidth={1.5} aria-hidden="true" />
+                <span>Relocate…</span>
+              </Button>
+            </div>
+          </Show>
         </div>
         <div class="flex flex-none items-center gap-3">
           <Show when={hasSelection()}>
@@ -355,6 +448,7 @@ const EpisodeRow: Component<EpisodeRowProps> = props => {
               hasSelection={hasSelection()}
               isInFlight={isSubInFlight()}
               isFailed={isSubFailed()}
+              isSourceMissing={isSourceMissing()}
               onPickTrack={props.onPickTrack}
               onExtract={props.onExtract}
               onCancelExtract={props.onCancelExtract}
@@ -362,6 +456,7 @@ const EpisodeRow: Component<EpisodeRowProps> = props => {
             <AudioActionButton
               isInFlight={isAudioInFlight()}
               isFailed={isAudioFailed()}
+              isSourceMissing={isSourceMissing()}
               onExtractAudio={props.onExtractAudio}
               onCancelAudio={props.onCancelAudio}
             />
@@ -377,6 +472,50 @@ const EpisodeRow: Component<EpisodeRowProps> = props => {
               Đổi track
             </button>
           </Show>
+
+          <div class="relative">
+            <button
+              type="button"
+              onClick={() => setMenuOpen(v => !v)}
+              onBlur={() => setTimeout(() => setMenuOpen(false), 150)}
+              class="flex h-9 w-9 items-center justify-center border-2 border-border bg-bg text-text-muted transition-colors hover:border-accent hover:text-accent"
+              aria-label="Mở menu Episode"
+              aria-expanded={menuOpen()}
+            >
+              <MoreVertical size={16} strokeWidth={1.5} aria-hidden="true" />
+            </button>
+            <Show when={menuOpen()}>
+              <div
+                class="absolute top-full right-0 z-10 mt-1 flex flex-col border-2 border-border bg-surface"
+                role="menu"
+              >
+                <button
+                  type="button"
+                  onMouseDown={() => {
+                    setMenuOpen(false)
+                    props.onRelocate()
+                  }}
+                  class="flex min-w-44 items-center gap-2 px-4 py-2 text-left text-sm text-text transition-colors hover:bg-bg hover:text-accent"
+                  role="menuitem"
+                >
+                  <FolderInput size={14} strokeWidth={1.5} aria-hidden="true" />
+                  <span>Đổi đường dẫn MKV…</span>
+                </button>
+                <button
+                  type="button"
+                  onMouseDown={() => {
+                    setMenuOpen(false)
+                    props.onRemove()
+                  }}
+                  class="flex min-w-44 items-center gap-2 border-t-2 border-border px-4 py-2 text-left text-sm text-danger transition-colors hover:bg-bg"
+                  role="menuitem"
+                >
+                  <Trash2 size={14} strokeWidth={1.5} aria-hidden="true" />
+                  <span>Xoá Episode…</span>
+                </button>
+              </div>
+            </Show>
+          </div>
         </div>
       </div>
 
@@ -468,6 +607,7 @@ interface ActionButtonProps {
   hasSelection: boolean
   isInFlight: boolean
   isFailed: boolean
+  isSourceMissing: boolean
   onPickTrack: () => void
   onExtract: () => void
   onCancelExtract: () => void
@@ -480,6 +620,7 @@ interface ActionButtonProps {
  *  - In-flight (q'd/running): "Hủy" (secondary, cancels)
  *  - Failed:                 "Thử lại" (primary, re-extracts — overwrite
  *                            confirm flow same as the idle path)
+ *  - MissingSource:          disabled with "MKV gốc không tìm thấy" tooltip
  *
  * The "Trích xuất sub" button is the slice 0007 AC's gated affordance:
  * it stays mounted even when no track is selected so the disabled
@@ -495,7 +636,9 @@ const ActionButton: Component<ActionButtonProps> = props => (
           variant="primary"
           onClick={() => props.onExtract()}
           disabled
-          title="Chọn subtitle track trước"
+          title={
+            props.isSourceMissing ? 'MKV gốc không tìm thấy' : 'Chọn subtitle track trước'
+          }
           aria-label="Trích xuất subtitle (yêu cầu chọn track trước)"
         >
           <Scissors size={18} strokeWidth={1.5} aria-hidden="true" />
@@ -504,6 +647,8 @@ const ActionButton: Component<ActionButtonProps> = props => (
         <Button
           variant="secondary"
           onClick={() => props.onPickTrack()}
+          disabled={props.isSourceMissing}
+          title={props.isSourceMissing ? 'MKV gốc không tìm thấy' : undefined}
           aria-label="Chọn subtitle track cho Episode này"
         >
           <span>Chọn track</span>
@@ -520,6 +665,8 @@ const ActionButton: Component<ActionButtonProps> = props => (
             <Button
               variant="primary"
               onClick={() => props.onExtract()}
+              disabled={props.isSourceMissing}
+              title={props.isSourceMissing ? 'MKV gốc không tìm thấy' : undefined}
               aria-label="Trích xuất phụ đề cho Episode này"
             >
               <Scissors size={18} strokeWidth={1.5} aria-hidden="true" />
@@ -530,6 +677,8 @@ const ActionButton: Component<ActionButtonProps> = props => (
           <Button
             variant="primary"
             onClick={() => props.onExtract()}
+            disabled={props.isSourceMissing}
+            title={props.isSourceMissing ? 'MKV gốc không tìm thấy' : undefined}
             aria-label="Thử trích xuất lại"
           >
             <RotateCw size={18} strokeWidth={1.5} aria-hidden="true" />
@@ -623,6 +772,7 @@ const AudioStateSlot: Component<AudioStateSlotProps> = props => (
 interface AudioActionButtonProps {
   isInFlight: boolean
   isFailed: boolean
+  isSourceMissing: boolean
   onExtractAudio: () => void
   onCancelAudio: () => void
 }
@@ -639,6 +789,7 @@ interface AudioActionButtonProps {
  *             the dialogue track)
  *  - Running: "Hủy" (secondary, cancels)
  *  - Failed:  "Thử lại audio" (secondary)
+ *  - MissingSource: disabled with "MKV gốc không tìm thấy" tooltip
  */
 const AudioActionButton: Component<AudioActionButtonProps> = props => (
   <Show
@@ -650,6 +801,8 @@ const AudioActionButton: Component<AudioActionButtonProps> = props => (
           <Button
             variant="secondary"
             onClick={() => props.onExtractAudio()}
+            disabled={props.isSourceMissing}
+            title={props.isSourceMissing ? 'MKV gốc không tìm thấy' : undefined}
             aria-label="Trích xuất audio cho Episode này"
           >
             <AudioLines size={16} strokeWidth={1.5} aria-hidden="true" />
@@ -660,6 +813,8 @@ const AudioActionButton: Component<AudioActionButtonProps> = props => (
         <Button
           variant="secondary"
           onClick={() => props.onExtractAudio()}
+          disabled={props.isSourceMissing}
+          title={props.isSourceMissing ? 'MKV gốc không tìm thấy' : undefined}
           aria-label="Thử trích xuất audio lại"
         >
           <RotateCw size={16} strokeWidth={1.5} aria-hidden="true" />

@@ -40,6 +40,14 @@ export interface EpisodeArtifactsView {
    * lỗi thời" badge on the Episode row (slice 0010 AC).
    */
   is_render_stale: boolean
+  /**
+   * `true` when this Episode's `source_mkv_path` no longer resolves
+   * on disk. Slice 0012. Drives the red "MKV gốc không tìm thấy"
+   * badge + disables Extract / Render buttons on the row.
+   * Translate-stage actions stay enabled because their inputs live
+   * inside the EpisodeFolder.
+   */
+  is_source_missing: boolean
   output_basename: string
   /**
    * Codec extension the project is currently configured for

@@ -78,6 +78,11 @@ pub fn run() {
             commands::episode_set_render_config_override,
             commands::render_start,
             commands::render_cancel,
+            commands::project_missing_sources,
+            commands::project_relocate_episode,
+            commands::project_rename,
+            commands::project_remove_episode,
+            commands::project_delete,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

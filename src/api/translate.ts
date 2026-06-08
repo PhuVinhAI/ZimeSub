@@ -45,7 +45,10 @@ export interface MakeDraftOutcome {
  * The backend rejects with "Thư mục Episode không tồn tại" when the
  * folder was deleted out from under ZimeSub.
  */
-export async function episodeOpenFolder(folder: string, episodeId: string): Promise<void> {
+export async function episodeOpenFolder(
+  folder: string,
+  episodeId: string
+): Promise<void> {
   return invoke<void>('episode_open_folder', { folder, episodeId })
 }
 

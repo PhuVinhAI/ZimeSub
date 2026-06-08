@@ -97,6 +97,10 @@ export interface EpisodeArtifactState {
   /** True when the rendered MP4 exists but is older than the
    *  TranslatedSub — drives the yellow "Render lỗi thời" badge. */
   isRenderStale: boolean
+  /** True when this Episode's source MKV no longer resolves on disk —
+   *  drives the red "MKV gốc không tìm thấy" badge + disables
+   *  Extract / Render buttons. Slice 0012. */
+  isSourceMissing: boolean
   audioExtension: string
   outputBasename: string
 }
@@ -405,9 +409,7 @@ function maybeWarnEncoderFallback(from: EncoderKey, to: EncoderKey): void {
   encoderFallbackToastShown.add(key)
   const fromLabel = ENCODER_LABELS[from] ?? from
   const toLabel = ENCODER_LABELS[to] ?? to
-  pushWarnToast(
-    `Encoder ${fromLabel} không khả dụng trên máy này, dùng ${toLabel}`
-  )
+  pushWarnToast(`Encoder ${fromLabel} không khả dụng trên máy này, dùng ${toLabel}`)
 }
 
 /**
@@ -548,6 +550,7 @@ function applyArtifactSnapshot(episodeId: string, view: EpisodeArtifactsView): v
     hasTranslatedSub: view.has_translated_sub,
     hasRender: view.has_render,
     isRenderStale: view.is_render_stale,
+    isSourceMissing: view.is_source_missing,
     audioExtension: view.audio_extension,
     outputBasename: view.output_basename
   })

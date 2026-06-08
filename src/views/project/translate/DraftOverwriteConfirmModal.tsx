@@ -46,7 +46,8 @@ const DraftOverwriteConfirmModal: Component<DraftOverwriteConfirmModalProps> = p
       <div class="flex flex-col gap-5">
         <p class="text-sm text-text">
           Episode này đã có sẵn file <code class="font-mono">.eng.ass.txt</code>. Tiếp tục
-          sẽ ghi đè nội dung hiện có bằng bản sao mới từ <code class="font-mono">.eng.ass</code>.
+          sẽ ghi đè nội dung hiện có bằng bản sao mới từ{' '}
+          <code class="font-mono">.eng.ass</code>.
         </p>
         <Show when={props.episodeName.length > 0}>
           <p class="break-all border-2 border-border bg-bg px-3 py-2 font-mono text-xs text-text-muted">

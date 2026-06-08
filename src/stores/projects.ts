@@ -2,9 +2,13 @@ import { projectSetSelectedTrack } from '@api/mkv_probe'
 import {
   projectAddEpisodes,
   projectCreate,
+  projectDelete,
   projectListRecents,
   projectOpen,
+  projectRelocateEpisode,
+  projectRemoveEpisode,
   projectRemoveRecent,
+  projectRename,
   projectSetExtractAudioConfig,
   type AddEpisodesOutcome,
   type ExtractAudioConfig,
@@ -12,11 +16,8 @@ import {
   type RecentProjectStatus,
   type RenderConfig
 } from '@api/projects'
-import {
-  episodeSetRenderConfigOverride,
-  projectSetRenderConfig
-} from '@api/render'
-import { pushDangerToast, pushWarnToast } from '@lib/toast/toastStore'
+import { episodeSetRenderConfigOverride, projectSetRenderConfig } from '@api/render'
+import { pushAccentToast, pushDangerToast, pushWarnToast } from '@lib/toast/toastStore'
 import { createStore } from 'solid-js/store'
 
 /**
@@ -323,6 +324,106 @@ export async function setRenderConfigOverride(
     setState({ active: project })
   } catch (err) {
     pushDangerToast(`Không lưu được override render: ${messageOf(err)}`)
+    throw err instanceof Error ? err : new Error(messageOf(err))
+  }
+}
+
+/**
+ * Update `source_mkv_path` for `episodeId` after the user picks a
+ * fresh `.mkv` via the OS file picker on a `MissingSource` overlay.
+ * Slice 0012.
+ *
+ * Updates `active` with the post-write project so the row re-renders
+ * with the new path immediately. The artefact cache (which carries
+ * `isSourceMissing`) is refreshed by the caller (`TranslatePanel`
+ * does this via `refreshArtifactsForEpisode`); the projects store
+ * itself doesn't touch the jobs store to avoid a circular import.
+ */
+export async function relocateEpisode(
+  episodeId: string,
+  newSourcePath: string
+): Promise<void> {
+  const folder = state.activeFolder
+  if (!folder) return
+  try {
+    const project = await projectRelocateEpisode(folder, episodeId, newSourcePath)
+    setState({ active: project })
+    pushAccentToast('Đã cập nhật đường dẫn MKV gốc')
+  } catch (err) {
+    pushDangerToast(`Không cập nhật được đường dẫn: ${messageOf(err)}`)
+    throw err instanceof Error ? err : new Error(messageOf(err))
+  }
+}
+
+/**
+ * Rename the active project. Slice 0012.
+ *
+ * On success, swaps `activeFolder` to the post-rename path so
+ * subsequent IPC calls hit the renamed folder, refreshes the recents
+ * list, and updates `active` with the new name. On failure the
+ * project is unchanged; the modal stays open so the user can fix the
+ * name and retry.
+ */
+export async function renameActiveProject(newName: string): Promise<void> {
+  const folder = state.activeFolder
+  if (!folder) return
+  try {
+    const outcome = await projectRename(folder, newName)
+    setState({
+      active: outcome.project,
+      activeFolder: outcome.new_folder_path
+    })
+    await refreshRecents()
+    pushAccentToast('Đã đổi tên project')
+  } catch (err) {
+    pushDangerToast(`Không đổi tên được project: ${messageOf(err)}`)
+    throw err instanceof Error ? err : new Error(messageOf(err))
+  }
+}
+
+/**
+ * Remove one Episode from the active project. Slice 0012.
+ *
+ * Backend cancels any in-flight jobs for this Episode first, deletes
+ * the EpisodeFolder, and drops the json record. SourceMkv at the
+ * original path is never touched per ADR-0001.
+ */
+export async function removeEpisode(episodeId: string): Promise<void> {
+  const folder = state.activeFolder
+  if (!folder) return
+  try {
+    const project = await projectRemoveEpisode(folder, episodeId)
+    setState({ active: project })
+    pushAccentToast('Đã xoá Episode')
+  } catch (err) {
+    pushDangerToast(`Không xoá được Episode: ${messageOf(err)}`)
+    throw err instanceof Error ? err : new Error(messageOf(err))
+  }
+}
+
+/**
+ * Delete the active project. Slice 0012.
+ *
+ * Recursively removes the ProjectFolder and drops the entry from
+ * `recent_projects`. SourceMkv files outside the project folder are
+ * never touched per ADR-0001. After a successful delete, `active`
+ * is cleared so the Main view falls back to the empty state.
+ */
+export async function deleteActiveProject(): Promise<void> {
+  const folder = state.activeFolder
+  if (!folder) return
+  try {
+    await projectDelete(folder)
+    setState({
+      active: null,
+      activeFolder: null,
+      phase: 'idle',
+      error: null
+    })
+    await refreshRecents()
+    pushAccentToast('Đã xoá project')
+  } catch (err) {
+    pushDangerToast(`Không xoá được project: ${messageOf(err)}`)
     throw err instanceof Error ? err : new Error(messageOf(err))
   }
 }
