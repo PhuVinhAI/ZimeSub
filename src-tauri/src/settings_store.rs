@@ -4,9 +4,10 @@
 //! on load and `#[serde(default)]` is applied to every known field so future
 //! slices can extend the file without breaking existing installs.
 //!
-//! Slice 0002 only persists `tool_paths` + `tool_versions` from the PRD
-//! schema; `available_encoders`, `recent_projects`, `queue_concurrency_*`,
-//! and the `ui` block land in their respective slices.
+//! Slice 0004 adds `recent_projects` — the move-to-front MRU list that
+//! drives the Sidebar recents and the post-Onboarding auto-open behaviour.
+//! `available_encoders`, `queue_concurrency_*`, and the `ui` block land in
+//! their respective later slices.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -14,6 +15,21 @@ use std::io;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
+
+/// Maximum number of entries kept in `recent_projects`. Anything older than
+/// the 20th most-recent open is dropped from the MRU list.
+pub const RECENT_PROJECTS_CAP: usize = 20;
+
+/// One entry in `recent_projects`. Stored as an object (not just a path
+/// string) so the Sidebar can render "vừa mở" / "X giờ trước" without
+/// stat-ing each folder on every render. The PRD's settings example showed
+/// just paths; this is a forward-compat extension within the same field.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RecentProject {
+    pub path: String,
+    /// ISO 8601 timestamp with timezone offset. Updated on open/create.
+    pub last_opened: String,
+}
 
 /// In-memory mirror of `settings.json`. Always serialised with `version: 1`
 /// regardless of whether the loaded file claimed an older version — the only
@@ -26,6 +42,8 @@ pub struct Settings {
     pub tool_paths: BTreeMap<String, String>,
     #[serde(default)]
     pub tool_versions: BTreeMap<String, String>,
+    #[serde(default)]
+    pub recent_projects: Vec<RecentProject>,
 }
 
 impl Default for Settings {
@@ -34,8 +52,40 @@ impl Default for Settings {
             version: 1,
             tool_paths: BTreeMap::new(),
             tool_versions: BTreeMap::new(),
+            recent_projects: Vec::new(),
         }
     }
+}
+
+impl Settings {
+    /// Move-to-front insert: stamps `last_opened`, deduplicates by path, and
+    /// caps the list at [`RECENT_PROJECTS_CAP`]. Path comparison is
+    /// case-insensitive on Windows because Windows file systems are
+    /// themselves case-insensitive — without this `C:\foo` and `c:\foo`
+    /// would produce duplicate rows in the Sidebar.
+    pub fn touch_recent_project(&mut self, path: &str, last_opened: String) {
+        self.recent_projects
+            .retain(|p| !paths_equal_ignoring_case(&p.path, path));
+        self.recent_projects.insert(
+            0,
+            RecentProject {
+                path: path.to_string(),
+                last_opened,
+            },
+        );
+        self.recent_projects.truncate(RECENT_PROJECTS_CAP);
+    }
+
+    /// Remove any recent entry whose path matches `path` (case-insensitive on
+    /// Windows). No-op when the path is not in the list.
+    pub fn remove_recent_project(&mut self, path: &str) {
+        self.recent_projects
+            .retain(|p| !paths_equal_ignoring_case(&p.path, path));
+    }
+}
+
+fn paths_equal_ignoring_case(a: &str, b: &str) -> bool {
+    a.eq_ignore_ascii_case(b)
 }
 
 fn default_version() -> u32 {
@@ -117,4 +167,77 @@ fn tmp_path_beside(path: &std::path::Path) -> PathBuf {
         .unwrap_or_else(|| "settings.json".to_string());
     p.set_file_name(format!("{name}.tmp"));
     p
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn touch_recent_inserts_at_front() {
+        let mut s = Settings::default();
+        s.touch_recent_project(r"C:\one", "2026-01-01T00:00:00+07:00".into());
+        s.touch_recent_project(r"C:\two", "2026-01-02T00:00:00+07:00".into());
+        assert_eq!(s.recent_projects.len(), 2);
+        assert_eq!(s.recent_projects[0].path, r"C:\two");
+        assert_eq!(s.recent_projects[1].path, r"C:\one");
+    }
+
+    #[test]
+    fn touch_recent_deduplicates_and_moves_to_front() {
+        let mut s = Settings::default();
+        s.touch_recent_project(r"C:\one", "2026-01-01T00:00:00+07:00".into());
+        s.touch_recent_project(r"C:\two", "2026-01-02T00:00:00+07:00".into());
+        s.touch_recent_project(r"C:\one", "2026-01-03T00:00:00+07:00".into());
+        assert_eq!(s.recent_projects.len(), 2);
+        assert_eq!(s.recent_projects[0].path, r"C:\one");
+        assert_eq!(s.recent_projects[0].last_opened, "2026-01-03T00:00:00+07:00");
+    }
+
+    #[test]
+    fn touch_recent_is_case_insensitive_on_windows_paths() {
+        let mut s = Settings::default();
+        s.touch_recent_project(r"C:\Foo", "2026-01-01T00:00:00+07:00".into());
+        s.touch_recent_project(r"c:\foo", "2026-01-02T00:00:00+07:00".into());
+        assert_eq!(s.recent_projects.len(), 1);
+        assert_eq!(s.recent_projects[0].path, r"c:\foo");
+    }
+
+    #[test]
+    fn touch_recent_caps_at_twenty() {
+        let mut s = Settings::default();
+        for i in 0..25 {
+            s.touch_recent_project(&format!(r"C:\p{i}"), format!("2026-01-01T00:00:{i:02}+07:00"));
+        }
+        assert_eq!(s.recent_projects.len(), RECENT_PROJECTS_CAP);
+        assert_eq!(s.recent_projects[0].path, r"C:\p24");
+        assert_eq!(s.recent_projects[RECENT_PROJECTS_CAP - 1].path, r"C:\p5");
+    }
+
+    #[test]
+    fn remove_recent_drops_matching_path() {
+        let mut s = Settings::default();
+        s.touch_recent_project(r"C:\one", "2026-01-01T00:00:00+07:00".into());
+        s.touch_recent_project(r"C:\two", "2026-01-02T00:00:00+07:00".into());
+        s.remove_recent_project(r"C:\ONE");
+        assert_eq!(s.recent_projects.len(), 1);
+        assert_eq!(s.recent_projects[0].path, r"C:\two");
+    }
+
+    #[test]
+    fn settings_round_trip_includes_recent_projects() {
+        let mut s = Settings::default();
+        s.touch_recent_project(r"C:\one", "2026-01-01T00:00:00+07:00".into());
+        let text = serde_json::to_string(&s).expect("serialize");
+        let back: Settings = serde_json::from_str(&text).expect("deserialize");
+        assert_eq!(back.recent_projects.len(), 1);
+        assert_eq!(back.recent_projects[0].path, r"C:\one");
+    }
+
+    #[test]
+    fn settings_loads_without_recent_projects_field() {
+        let text = r#"{"version":1,"tool_paths":{},"tool_versions":{}}"#;
+        let s: Settings = serde_json::from_str(text).expect("deserialize legacy");
+        assert!(s.recent_projects.is_empty());
+    }
 }

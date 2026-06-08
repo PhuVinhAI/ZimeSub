@@ -4,9 +4,12 @@ import { registerShortcut } from './shortcut-registry'
 /**
  * Install app-wide shortcuts. Call once at boot from `AppShell`.
  *
- * Slice 0001 wires only Escape → close top modal (the modal stack is empty
- * until later slices). Add Ctrl+N (slice 0004), Ctrl+, (settings), J/K
- * (episode list nav) here when those views land.
+ * Slice 0001 wired only Escape → close top modal. Slice 0004's Ctrl+N
+ * ("Tạo project mới") lives directly on `AppShell` via
+ * `useKeyboardShortcut` so it picks up disposal during HMR; this
+ * installer stays minimal for boot-time bindings that have no owning
+ * component yet. Ctrl+, (settings) and J/K (episode list nav) belong
+ * in their respective slices.
  */
 export function installGlobalShortcuts(): () => void {
   const offEscape = registerShortcut({

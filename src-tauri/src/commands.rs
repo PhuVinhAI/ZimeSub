@@ -10,12 +10,14 @@
 //!
 //! The frontend mirrors the names and shapes here in `src/api/`.
 
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use tauri::{AppHandle, State};
 use tracing::error;
 
 use crate::install::{self, InstallRegistry};
+use crate::project_store::{self, FolderInspection, ProjectJson, RecentProjectStatus};
 use crate::settings_store::{self, Settings};
 use crate::tooling::{self, RequiredTool, ToolReport};
 
@@ -113,4 +115,108 @@ fn run_probe(state: State<'_, AppState>, mode: ProbeMode) -> Result<Vec<ToolRepo
     }
 
     Ok(reports)
+}
+
+/// Inspect `folder` so the Create Project modal can route between
+/// "Tạo" / "Mở project hiện có" / blocking error. Never mutates the
+/// folder.
+#[tauri::command]
+pub fn project_inspect_folder(folder: String) -> Result<FolderInspection, String> {
+    project_store::inspect_folder(Path::new(&folder)).map_err(|e| e.to_string())
+}
+
+/// Create a fresh `zimesub.json` inside `folder` and bump the project to
+/// the head of `recent_projects` in app settings. Returns the new
+/// project so the frontend can render the Main view without a second
+/// open round-trip.
+#[tauri::command]
+pub fn project_create(
+    state: State<'_, AppState>,
+    folder: String,
+    name: String,
+) -> Result<ProjectJson, String> {
+    let project = project_store::create_project(Path::new(&folder), &name)
+        .map_err(|e| e.to_string())?;
+    touch_recent_and_save(&state, &folder)?;
+    Ok(project)
+}
+
+/// Read `zimesub.json` from `folder` and bump it to the head of
+/// `recent_projects`. Returns the parsed project.
+#[tauri::command]
+pub fn project_open(state: State<'_, AppState>, folder: String) -> Result<ProjectJson, String> {
+    let project = project_store::open_project(Path::new(&folder)).map_err(|e| e.to_string())?;
+    touch_recent_and_save(&state, &folder)?;
+    Ok(project)
+}
+
+/// Enumerate `recent_projects` from app settings, enriched with liveness
+/// flags (`folder_exists`, `has_zimesub_json`) and the project name when
+/// readable. Most-recent-first ordering is preserved from the underlying
+/// settings list.
+#[tauri::command]
+pub fn project_list_recents(
+    state: State<'_, AppState>,
+) -> Result<Vec<RecentProjectStatus>, String> {
+    let settings = state
+        .settings
+        .lock()
+        .map_err(|e| format!("settings mutex poisoned: {e}"))?;
+
+    let recents: Vec<RecentProjectStatus> = settings
+        .recent_projects
+        .iter()
+        .map(|entry| {
+            let path = Path::new(&entry.path);
+            let folder_exists = project_store::folder_exists(path);
+            let has_zimesub_json = folder_exists && project_store::folder_has_manifest(path);
+            let name = if has_zimesub_json {
+                project_store::peek_project_name(path)
+            } else {
+                None
+            };
+            RecentProjectStatus {
+                path: entry.path.clone(),
+                last_opened: entry.last_opened.clone(),
+                folder_exists,
+                has_zimesub_json,
+                name,
+            }
+        })
+        .collect();
+
+    Ok(recents)
+}
+
+/// Drop one entry from `recent_projects`. Wired to the "Gỡ khỏi danh
+/// sách" button on missing rows in the Sidebar.
+#[tauri::command]
+pub fn project_remove_recent(state: State<'_, AppState>, folder: String) -> Result<(), String> {
+    let mut settings = state
+        .settings
+        .lock()
+        .map_err(|e| format!("settings mutex poisoned: {e}"))?;
+    settings.remove_recent_project(&folder);
+    if let Err(err) = settings_store::save(&settings) {
+        error!(error = %err, "failed to persist settings.json after removing recent");
+        return Err(err.to_string());
+    }
+    Ok(())
+}
+
+/// Move `folder` to the head of `recent_projects` with a fresh
+/// `last_opened` stamp and flush settings to disk. Used by both
+/// `project_create` and `project_open` so the recents MRU stays in sync
+/// regardless of which entry point the user took.
+fn touch_recent_and_save(state: &State<'_, AppState>, folder: &str) -> Result<(), String> {
+    let mut settings = state
+        .settings
+        .lock()
+        .map_err(|e| format!("settings mutex poisoned: {e}"))?;
+    settings.touch_recent_project(folder, project_store::now_local_iso8601());
+    if let Err(err) = settings_store::save(&settings) {
+        error!(error = %err, "failed to persist settings.json after project touch");
+        return Err(err.to_string());
+    }
+    Ok(())
 }
