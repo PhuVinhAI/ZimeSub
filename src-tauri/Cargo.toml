@@ -1,18 +1,18 @@
 [package]
-name = "app"
-version = "2.0.0"
-description = "A Tauri Solid TypeScript Tailwind Vite App Template"
-authors = ["AR10"]
+name = "zimesub"
+version = "0.1.0"
+description = "Pipeline làm phụ đề tiếng Việt cho anime"
+authors = ["PhuVinhAI"]
 license = "MIT"
-repository = "https://github.com/AR10Dev/tauri-solid-ts-tailwind-vite"
-default-run = "app"
+repository = "https://github.com/PhuVinhAI/ZimeSub"
+default-run = "zimesub"
 edition = "2024"
 
 [lib]
 # The `_lib` suffix may seem redundant but it is necessary
 # to make the lib name unique and wouldn't conflict with the bin name.
 # This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
-name = "app_lib"
+name = "zimesub_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 

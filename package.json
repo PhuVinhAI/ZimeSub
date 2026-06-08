@@ -1,7 +1,8 @@
 {
-  "name": "tauri-solid-tailwind-ts-vite-template",
-  "version": "2.0.0",
-  "author": "AR10",
+  "name": "zimesub",
+  "version": "0.1.0",
+  "author": "PhuVinhAI",
+  "description": "Pipeline làm phụ đề tiếng Việt cho anime (Tauri + SolidJS).",
   "type": "module",
   "scripts": {
     "dev": "vite dev",
@@ -13,6 +14,9 @@
     "prettier:fix": "prettier src -w",
     "eslint": "eslint src",
     "eslint:fix": "eslint src --fix",
+    "lint:classes": "node scripts/lint-forbidden-classes.mjs",
+    "lint": "bun run lint:classes && bun run eslint",
+    "typecheck": "tsc --noEmit",
     "tauri": "tauri"
   },
   "license": "MIT",
@@ -34,8 +38,11 @@
     "vite-plugin-solid": "2.11.12"
   },
   "dependencies": {
+    "@fontsource-variable/geist": "^5.2.9",
+    "@fontsource-variable/geist-mono": "^5.2.8",
     "@tauri-apps/api": "2.11.0",
     "@tauri-apps/cli": "2.11.2",
+    "lucide-solid": "^1.17.0",
     "solid-js": "1.9.13"
   }
 }
