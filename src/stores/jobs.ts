@@ -85,6 +85,12 @@ const EMPTY_JOB_STATE: EpisodeJobState = {
 export interface EpisodeArtifactState {
   hasExtractedSub: boolean
   hasExtractedAudio: boolean
+  hasTranslationDraft: boolean
+  hasTranslatedSub: boolean
+  hasRender: boolean
+  /** True when the rendered MP4 exists but is older than the
+   *  TranslatedSub — drives the yellow "Render lỗi thời" badge. */
+  isRenderStale: boolean
   audioExtension: string
   outputBasename: string
 }
@@ -462,6 +468,10 @@ function applyArtifactSnapshot(episodeId: string, view: EpisodeArtifactsView): v
   setState('artifacts', episodeId, {
     hasExtractedSub: view.has_extracted_sub,
     hasExtractedAudio: view.has_extracted_audio,
+    hasTranslationDraft: view.has_translation_draft,
+    hasTranslatedSub: view.has_translated_sub,
+    hasRender: view.has_render,
+    isRenderStale: view.is_render_stale,
     audioExtension: view.audio_extension,
     outputBasename: view.output_basename
   })

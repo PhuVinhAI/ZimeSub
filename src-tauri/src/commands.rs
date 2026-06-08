@@ -17,6 +17,7 @@ use serde::Serialize;
 use tauri::{AppHandle, State};
 use tracing::error;
 
+use crate::ass_ops::{self, AssOpsError};
 use crate::episode_state::{self, EpisodeArtifacts};
 use crate::install::{self, InstallRegistry};
 use crate::job_queue::{ExtractAudioSpec, ExtractSubtitleSpec, JobQueue, JobSpec, JobsSnapshot};
@@ -419,6 +420,7 @@ pub struct EpisodeArtifactsView {
     pub has_translation_draft: bool,
     pub has_translated_sub: bool,
     pub has_render: bool,
+    pub is_render_stale: bool,
     pub output_basename: String,
     pub audio_extension: String,
 }
@@ -435,6 +437,7 @@ impl EpisodeArtifactsView {
             has_translation_draft: inspected.has_translation_draft,
             has_translated_sub: inspected.has_translated_sub,
             has_render: inspected.has_render,
+            is_render_stale: inspected.is_render_stale,
             output_basename,
             audio_extension,
         }
@@ -770,4 +773,133 @@ fn touch_recent_and_save(state: &State<'_, AppState>, folder: &str) -> Result<()
         return Err(err.to_string());
     }
     Ok(())
+}
+
+/// Resolve `(folder, episode_id)` to the EpisodeFolder + basename
+/// pair the translate-stage commands use to build their target paths.
+/// Returns the post-resolution `(episode_folder, basename)`.
+fn resolve_episode_folder(
+    folder: &str,
+    episode_id: &str,
+) -> Result<(PathBuf, String), String> {
+    let project_folder = Path::new(folder);
+    let project = project_store::open_project(project_folder).map_err(|e| e.to_string())?;
+    let episode = project
+        .episodes
+        .iter()
+        .find(|e| e.id == episode_id)
+        .ok_or_else(|| "Không tìm thấy Episode trong project".to_string())?;
+    let episode_folder = project_folder.join(&episode.folder_name);
+    Ok((episode_folder, episode.folder_name.clone()))
+}
+
+/// Outcome of [`episode_make_translation_draft`].
+///
+/// `existed_before = true` when `<basename>.eng.ass.txt` already
+/// existed on disk and the call ran in overwrite mode — drives the
+/// frontend toast copy ("Đã ghi đè bản nháp" vs "Đã tạo bản nháp").
+#[derive(Debug, Serialize)]
+pub struct MakeDraftOutcome {
+    pub existed_before: bool,
+}
+
+/// Open the EpisodeFolder in Windows Explorer. Slice 0010 button 1.
+///
+/// Wraps `tauri-plugin-opener`'s `open_path` because the frontend's
+/// `@tauri-apps/plugin-opener` requires a separate `opener:allow-open-path`
+/// capability — exposing this as a command keeps the capability surface
+/// tight (we only allow paths inside known project folders) and lets the
+/// rest of the panel stay free of plugin imports.
+#[tauri::command]
+pub fn episode_open_folder(folder: String, episode_id: String) -> Result<(), String> {
+    let (episode_folder, _basename) = resolve_episode_folder(&folder, &episode_id)?;
+    if !episode_folder.is_dir() {
+        // The EpisodeFolder is normally created on add_episodes; a
+        // missing folder here means the user deleted it from Explorer
+        // mid-session — surface a Vietnamese message instead of the
+        // raw shell-open error.
+        return Err("Thư mục Episode không tồn tại".to_string());
+    }
+    open_episode_folder_via_opener(&episode_folder)
+}
+
+fn open_episode_folder_via_opener(folder: &Path) -> Result<(), String> {
+    tauri_plugin_opener::open_path(folder, None::<&str>)
+        .map_err(|e| format!("Không mở được Explorer: {e}"))
+}
+
+/// Create `<basename>.eng.ass.txt` from `<basename>.eng.ass`. Slice 0010
+/// button 2.
+///
+/// `overwrite = false` and an existing draft returns
+/// "File đích đã tồn tại" so the frontend can re-invoke with
+/// `overwrite = true` after the user confirms via the in-modal banner.
+/// Returns `existed_before` so the frontend's toast copy can flip from
+/// "Đã tạo bản nháp" to "Đã ghi đè bản nháp" on a successful overwrite.
+#[tauri::command]
+pub fn episode_make_translation_draft(
+    folder: String,
+    episode_id: String,
+    overwrite: bool,
+) -> Result<MakeDraftOutcome, String> {
+    let (episode_folder, basename) = resolve_episode_folder(&folder, &episode_id)?;
+    let source = episode_folder.join(format!("{basename}.eng.ass"));
+    let target = episode_folder.join(format!("{basename}.eng.ass.txt"));
+    let existed_before = target.is_file();
+    match ass_ops::make_draft(&source, &target, overwrite) {
+        Ok(()) => Ok(MakeDraftOutcome { existed_before }),
+        Err(AssOpsError::TargetExists) => Err("TARGET_EXISTS".to_string()),
+        Err(AssOpsError::SourceMissing) => {
+            Err("Chưa có .eng.ass — cần trích xuất subtitle trước".to_string())
+        }
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+/// Write `<basename>.vietsub.ass` from the user's pasted full ASS
+/// blob. Slice 0010 button 3.
+///
+/// `overwrite = false` + existing target → `"TARGET_EXISTS"` sentinel
+/// the frontend maps to the in-modal banner (and the "Ghi đè và lưu"
+/// button re-invokes with `overwrite = true`). Atomic write via
+/// [`ass_ops::write_translated`] so a mid-write crash leaves the
+/// previous TranslatedSub intact.
+#[tauri::command]
+pub fn episode_write_translated(
+    folder: String,
+    episode_id: String,
+    content: String,
+    overwrite: bool,
+) -> Result<(), String> {
+    let (episode_folder, basename) = resolve_episode_folder(&folder, &episode_id)?;
+    let target = episode_folder.join(format!("{basename}.vietsub.ass"));
+    match ass_ops::write_translated(&target, &content, overwrite) {
+        Ok(()) => Ok(()),
+        Err(AssOpsError::TargetExists) => Err("TARGET_EXISTS".to_string()),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+/// Replace the `[V4+ Styles]` section in `<basename>.vietsub.ass`
+/// with the pasted block. Slice 0010 button 4 (StylePatch).
+///
+/// The pasted block must already validate (UI runs the same check
+/// pre-save); the backend re-validates as a defence-in-depth so a
+/// bypassed UI doesn't corrupt the on-disk file. Returns
+/// `"NO_TRANSLATED_SUB"` when the TranslatedSub doesn't exist —
+/// the frontend already disables the button in that case but the
+/// guard keeps the IPC honest.
+#[tauri::command]
+pub fn episode_style_patch(
+    folder: String,
+    episode_id: String,
+    styles_block: String,
+) -> Result<(), String> {
+    let (episode_folder, basename) = resolve_episode_folder(&folder, &episode_id)?;
+    let target = episode_folder.join(format!("{basename}.vietsub.ass"));
+    if !target.is_file() {
+        return Err("NO_TRANSLATED_SUB".to_string());
+    }
+    ass_ops::validate_styles_block(&styles_block).map_err(|e| e.to_string())?;
+    ass_ops::replace_styles_section(&target, &styles_block).map_err(|e| e.to_string())
 }

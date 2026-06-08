@@ -33,6 +33,13 @@ export interface EpisodeArtifactsView {
   has_translation_draft: boolean
   has_translated_sub: boolean
   has_render: boolean
+  /**
+   * `true` when a Render artefact exists AND its mtime is older than
+   * the TranslatedSub's mtime — i.e. the user re-translated (or
+   * StylePatch'd) after the last render. Drives the yellow "Render
+   * lỗi thời" badge on the Episode row (slice 0010 AC).
+   */
+  is_render_stale: boolean
   output_basename: string
   /**
    * Codec extension the project is currently configured for

@@ -22,6 +22,7 @@ import AudioOverwriteConfirmModal from '@views/project/AudioOverwriteConfirmModa
 import ExtractConfirmModal from '@views/project/ExtractConfirmModal'
 import ExtractErrorModal from '@views/project/ExtractErrorModal'
 import ProjectSettingsModal from '@views/project/ProjectSettingsModal'
+import TranslatePanel from '@views/project/translate/TranslatePanel'
 import TrackPickerModal from '@views/track-picker/TrackPickerModal'
 import {
   AudioLines,
@@ -55,6 +56,10 @@ interface ProjectViewProps {
  * always-enabled, decorative — does not gate EpisodeState progression.
  * The middle slot becomes a stacked column showing both subtitle and
  * audio status independently.
+ * Slice 0010 adds the Translate-stage helper strip below the row when
+ * `<basename>.eng.ass` exists — four buttons (open folder, make draft,
+ * paste translation, paste styles) plus a yellow "Render lỗi thời"
+ * badge driven by the backend's `is_render_stale` flag.
  *
  * The drag-drop overlay itself is hosted by `AppShell` so it covers the
  * whole window (Sidebar + StatusBar included), per the AC.
@@ -298,77 +303,86 @@ const EpisodeRow: Component<EpisodeRowProps> = props => {
   return (
     <li
       class={[
-        'flex items-center justify-between gap-6 px-5 py-4',
+        'flex flex-col gap-0 px-5 py-4',
         props.isLast ? '' : 'border-b-2 border-border'
       ].join(' ')}
     >
-      <div class="flex min-w-0 flex-1 flex-col gap-1">
-        <span
-          class="truncate text-base font-medium text-text"
-          title={props.episode.source_mkv_path}
-        >
-          {props.episode.folder_name}
-        </span>
-        <span
-          class="truncate font-mono text-xs text-text-muted"
-          title={props.episode.source_mkv_path}
-        >
-          {props.episode.source_mkv_path}
-        </span>
-      </div>
-      <div class="flex flex-none items-center gap-3">
-        <Show when={hasSelection()}>
-          <StatusBadge tone="neutral">{languageTag()}</StatusBadge>
-        </Show>
-
-        <div class="flex flex-col items-end gap-1.5">
-          <StateSlot
-            isQueued={isSubQueued()}
-            isRunning={isSubRunning()}
-            isFailed={isSubFailed()}
-            hasExtractedSub={hasExtractedSub()}
-            ratio={subJob().ratio}
-            hint={subJob().hint}
-            onShowError={props.onShowError}
-          />
-          <AudioStateSlot
-            isQueued={isAudioQueued()}
-            isRunning={isAudioRunning()}
-            isFailed={isAudioFailed()}
-            hasExtractedAudio={hasExtractedAudio()}
-            ratio={audioJob().ratio}
-            hint={audioJob().hint}
-          />
-        </div>
-
-        <div class="flex flex-col gap-1.5">
-          <ActionButton
-            hasSelection={hasSelection()}
-            isInFlight={isSubInFlight()}
-            isFailed={isSubFailed()}
-            onPickTrack={props.onPickTrack}
-            onExtract={props.onExtract}
-            onCancelExtract={props.onCancelExtract}
-          />
-          <AudioActionButton
-            isInFlight={isAudioInFlight()}
-            isFailed={isAudioFailed()}
-            onExtractAudio={props.onExtractAudio}
-            onCancelAudio={props.onCancelAudio}
-          />
-        </div>
-
-        <Show when={hasSelection() && !isSubInFlight()}>
-          <button
-            type="button"
-            onClick={() => props.onPickTrack()}
-            class="text-sm font-medium text-accent underline-offset-4 transition-colors hover:text-text hover:underline"
-            aria-label="Đổi subtitle track cho Episode này"
+      <div class="flex items-center justify-between gap-6">
+        <div class="flex min-w-0 flex-1 flex-col gap-1">
+          <span
+            class="truncate text-base font-medium text-text"
+            title={props.episode.source_mkv_path}
           >
-            Đổi track
-          </button>
-        </Show>
+            {props.episode.folder_name}
+          </span>
+          <span
+            class="truncate font-mono text-xs text-text-muted"
+            title={props.episode.source_mkv_path}
+          >
+            {props.episode.source_mkv_path}
+          </span>
+        </div>
+        <div class="flex flex-none items-center gap-3">
+          <Show when={hasSelection()}>
+            <StatusBadge tone="neutral">{languageTag()}</StatusBadge>
+          </Show>
+
+          <div class="flex flex-col items-end gap-1.5">
+            <StateSlot
+              isQueued={isSubQueued()}
+              isRunning={isSubRunning()}
+              isFailed={isSubFailed()}
+              hasExtractedSub={hasExtractedSub()}
+              ratio={subJob().ratio}
+              hint={subJob().hint}
+              onShowError={props.onShowError}
+            />
+            <AudioStateSlot
+              isQueued={isAudioQueued()}
+              isRunning={isAudioRunning()}
+              isFailed={isAudioFailed()}
+              hasExtractedAudio={hasExtractedAudio()}
+              ratio={audioJob().ratio}
+              hint={audioJob().hint}
+            />
+          </div>
+
+          <div class="flex flex-col gap-1.5">
+            <ActionButton
+              hasSelection={hasSelection()}
+              isInFlight={isSubInFlight()}
+              isFailed={isSubFailed()}
+              onPickTrack={props.onPickTrack}
+              onExtract={props.onExtract}
+              onCancelExtract={props.onCancelExtract}
+            />
+            <AudioActionButton
+              isInFlight={isAudioInFlight()}
+              isFailed={isAudioFailed()}
+              onExtractAudio={props.onExtractAudio}
+              onCancelAudio={props.onCancelAudio}
+            />
+          </div>
+
+          <Show when={hasSelection() && !isSubInFlight()}>
+            <button
+              type="button"
+              onClick={() => props.onPickTrack()}
+              class="text-sm font-medium text-accent underline-offset-4 transition-colors hover:text-text hover:underline"
+              aria-label="Đổi subtitle track cho Episode này"
+            >
+              Đổi track
+            </button>
+          </Show>
+        </div>
       </div>
+
+      <Show when={hasExtractedSub()}>
+        <TranslatePanel
+          episodeId={props.episode.id}
+          episodeName={props.episode.folder_name}
+        />
+      </Show>
     </li>
   )
 }

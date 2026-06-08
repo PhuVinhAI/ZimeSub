@@ -23,6 +23,12 @@
 //! anything. The cleanup is silent on missing folders so a project
 //! whose folder was deleted out from under ZimeSub still loads.
 //!
+//! Slice 0010 lights up the translate-stage flags: `has_translation_draft`
+//! (`<basename>.eng.ass.txt`) and `has_translated_sub`
+//! (`<basename>.vietsub.ass`). It also adds [`is_render_stale`] —
+//! the mtime check the row uses to surface the yellow "Render lỗi
+//! thời" badge when a TranslatedSub was edited after the last render.
+//!
 //! Pure-ish: the function calls `Path::is_file` (one syscall per
 //! artefact) but performs no other I/O and never mutates the folder.
 //! Fixture-driven unit tests use a tempdir.
@@ -47,6 +53,13 @@ use tracing::{info, warn};
 /// depend on it, so the row badge derivation keeps using
 /// `has_extracted_sub` / `has_translated_sub` / `has_render`. The new
 /// flag drives a small companion "audio" indicator badge.
+///
+/// Slice 0010 wires `has_translation_draft` (`<basename>.eng.ass.txt`),
+/// `has_translated_sub` (`<basename>.vietsub.ass`), and
+/// `is_render_stale` (Render mtime older than TranslatedSub mtime).
+/// `has_render` is also lit up early so the staleness check has
+/// something to compare against; the Render pipeline itself arrives
+/// in slice 0011.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct EpisodeArtifacts {
     pub has_extracted_sub: bool,
@@ -54,6 +67,14 @@ pub struct EpisodeArtifacts {
     pub has_translation_draft: bool,
     pub has_translated_sub: bool,
     pub has_render: bool,
+    /// `true` when a Render artefact exists AND its mtime is older
+    /// than the TranslatedSub's mtime — i.e. the user re-translated
+    /// (or StylePatch'd) after the last render so the on-disk
+    /// `<basename>.VietSub.mp4` no longer reflects the current
+    /// translation. Drives the yellow "Render lỗi thời" badge on the
+    /// Episode row. `false` when either file is missing (no render
+    /// → nothing to be stale).
+    pub is_render_stale: bool,
 }
 
 /// Inspect `episode_folder` and report which derived artefacts are
@@ -72,19 +93,54 @@ pub fn inspect_artifacts(
     audio_extension: Option<&str>,
 ) -> EpisodeArtifacts {
     let extracted_sub = episode_folder.join(format!("{basename}.eng.ass"));
+    let translation_draft = episode_folder.join(format!("{basename}.eng.ass.txt"));
+    let translated_sub = episode_folder.join(format!("{basename}.vietsub.ass"));
+    let render = episode_folder.join(format!("{basename}.VietSub.mp4"));
     let has_extracted_audio = audio_extension
         .map(|ext| {
             let candidate = episode_folder.join(format!("{basename}.{ext}"));
             candidate.is_file()
         })
         .unwrap_or(false);
+    let has_translated_sub = translated_sub.is_file();
+    let has_render = render.is_file();
+    let is_render_stale = if has_render && has_translated_sub {
+        is_first_older_than_second(&render, &translated_sub)
+    } else {
+        false
+    };
     EpisodeArtifacts {
         has_extracted_sub: extracted_sub.is_file(),
         has_extracted_audio,
-        has_translation_draft: false,
-        has_translated_sub: false,
-        has_render: false,
+        has_translation_draft: translation_draft.is_file(),
+        has_translated_sub,
+        has_render,
+        is_render_stale,
     }
+}
+
+/// Compare two existing files' mtimes. Returns `true` when `a` is
+/// strictly older than `b`. Used by [`inspect_artifacts`] for the
+/// render-staleness check.
+///
+/// Silent on metadata errors — returns `false` so a transient
+/// permissions glitch never surfaces a misleading "stale render"
+/// badge. The forensic readback path lives in
+/// [`clean_stale_artifacts`] for actual disk problems.
+fn is_first_older_than_second(a: &Path, b: &Path) -> bool {
+    let Ok(a_meta) = fs::metadata(a) else {
+        return false;
+    };
+    let Ok(b_meta) = fs::metadata(b) else {
+        return false;
+    };
+    let Ok(a_mtime) = a_meta.modified() else {
+        return false;
+    };
+    let Ok(b_mtime) = b_meta.modified() else {
+        return false;
+    };
+    a_mtime < b_mtime
 }
 
 /// Crash-recovery scan for one EpisodeFolder. Walks the folder
@@ -330,6 +386,74 @@ mod tests {
         assert!(deleted.is_empty());
         assert!(dir.join("foo.mp4.bak").exists());
         assert!(dir.join("foo.ass.txt").exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn presence_of_eng_ass_txt_flips_has_translation_draft() {
+        let dir = temp_dir_for_test("has-draft");
+        let basename = "show-01";
+        fs::write(dir.join(format!("{basename}.eng.ass.txt")), b"x").expect("write");
+        let artifacts = inspect_artifacts(&dir, basename, Some("mp3"));
+        assert!(artifacts.has_translation_draft);
+        assert!(!artifacts.has_translated_sub);
+        assert!(!artifacts.has_render);
+        assert!(!artifacts.is_render_stale);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn presence_of_vietsub_ass_flips_has_translated_sub() {
+        let dir = temp_dir_for_test("has-vietsub");
+        let basename = "show-01";
+        fs::write(dir.join(format!("{basename}.vietsub.ass")), b"x").expect("write");
+        let artifacts = inspect_artifacts(&dir, basename, Some("mp3"));
+        assert!(artifacts.has_translated_sub);
+        assert!(!artifacts.has_render);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn presence_of_vietsub_mp4_flips_has_render() {
+        let dir = temp_dir_for_test("has-render");
+        let basename = "show-01";
+        fs::write(dir.join(format!("{basename}.VietSub.mp4")), b"x").expect("write");
+        let artifacts = inspect_artifacts(&dir, basename, Some("mp3"));
+        assert!(artifacts.has_render);
+        // No TranslatedSub to compare against — staleness must be false.
+        assert!(!artifacts.is_render_stale);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn render_older_than_translated_sub_flips_is_render_stale() {
+        let dir = temp_dir_for_test("stale-render");
+        let basename = "show-01";
+        let render = dir.join(format!("{basename}.VietSub.mp4"));
+        let translated = dir.join(format!("{basename}.vietsub.ass"));
+        fs::write(&render, b"old-render").expect("write");
+        // Sleep enough for the OS mtime resolution to actually tick —
+        // 100 ms is safe on every common FS (FAT32 = 2 s is not in
+        // play here, NTFS = 100 ns, tmpfs = nanosecond).
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        fs::write(&translated, b"newer-translation").expect("write");
+        let artifacts = inspect_artifacts(&dir, basename, Some("mp3"));
+        assert!(artifacts.has_render);
+        assert!(artifacts.has_translated_sub);
+        assert!(artifacts.is_render_stale);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn render_newer_than_translated_sub_keeps_is_render_stale_false() {
+        let dir = temp_dir_for_test("fresh-render");
+        let basename = "show-01";
+        fs::write(dir.join(format!("{basename}.vietsub.ass")), b"old").expect("write");
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        fs::write(dir.join(format!("{basename}.VietSub.mp4")), b"new").expect("write");
+        let artifacts = inspect_artifacts(&dir, basename, Some("mp3"));
+        assert!(artifacts.has_render);
+        assert!(!artifacts.is_render_stale);
         let _ = fs::remove_dir_all(&dir);
     }
 }
