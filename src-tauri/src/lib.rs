@@ -43,6 +43,7 @@ pub fn run() {
             commands::project_open,
             commands::project_list_recents,
             commands::project_remove_recent,
+            commands::project_add_episodes,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

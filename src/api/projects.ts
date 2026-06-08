@@ -61,6 +61,23 @@ export interface RecentProjectStatus {
 }
 
 /**
+ * Result of [`projectAddEpisodes`]. Mirrors `project_store::AddEpisodesOutcome`.
+ *
+ * `project` is the post-write state — frontend swaps `projectsStore.active`
+ * with this to avoid a second `project_open` round-trip.
+ *
+ * `duplicates` carries the source paths that were already present in the
+ * project (case-insensitive match against `episodes[].source_mkv_path`)
+ * and were therefore skipped — slice 0005 surfaces one yellow toast per
+ * entry per the AC ("Episode này đã có trong project").
+ */
+export interface AddEpisodesOutcome {
+  project: ProjectJson
+  added_count: number
+  duplicates: string[]
+}
+
+/**
  * Ask the backend whether `folder` is safe to create a new project in,
  * already hosts a `zimesub.json` (offer to open it instead), or is
  * non-empty and contains unrelated files (blocking error).
@@ -103,4 +120,23 @@ export async function projectListRecents(): Promise<RecentProjectStatus[]> {
  */
 export async function projectRemoveRecent(folder: string): Promise<void> {
   return invoke<void>('project_remove_recent', { folder })
+}
+
+/**
+ * Append one Episode per entry in `sourcePaths` to the project at
+ * `folder`. Backend creates each EpisodeFolder on disk and rewrites
+ * `zimesub.json` atomically when at least one Episode is appended.
+ *
+ * Pre-condition: the caller MUST filter inputs down to `.mkv` paths —
+ * the AC keeps the extension check on the UI side so the toast can name
+ * the offending file. The backend does not re-validate.
+ */
+export async function projectAddEpisodes(
+  folder: string,
+  sourcePaths: string[]
+): Promise<AddEpisodesOutcome> {
+  return invoke<AddEpisodesOutcome>('project_add_episodes', {
+    folder,
+    sourcePaths
+  })
 }

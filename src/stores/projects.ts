@@ -1,11 +1,14 @@
 import {
+  projectAddEpisodes,
   projectCreate,
   projectListRecents,
   projectOpen,
   projectRemoveRecent,
+  type AddEpisodesOutcome,
   type ProjectJson,
   type RecentProjectStatus
 } from '@api/projects'
+import { pushDangerToast, pushWarnToast } from '@lib/toast/toastStore'
 import { createStore } from 'solid-js/store'
 
 /**
@@ -105,7 +108,10 @@ export async function openProjectByPath(folder: string): Promise<void> {
  * Create Project modal can render it inline; the store also persists
  * it via `phase = 'error'` for any other observers.
  */
-export async function createNewProject(folder: string, name: string): Promise<ProjectJson> {
+export async function createNewProject(
+  folder: string,
+  name: string
+): Promise<ProjectJson> {
   setState({ phase: 'loading', error: null })
   try {
     const project = await projectCreate(folder, name)
@@ -156,6 +162,88 @@ export function closeActiveProject(): void {
     phase: 'idle',
     error: null
   })
+}
+
+/**
+ * Filter `paths` to those ending in `.mkv` (case-insensitive). Used by
+ * both drag-drop and the multi-file picker so the AC's per-file
+ * extension validation lives in exactly one place.
+ *
+ * Returned `accepted` preserves the input order; `rejected` is the list
+ * of basenames (NOT full paths) that failed the check, so the toast
+ * text can name the offending file without leaking absolute paths the
+ * user may not want flashed across the screen.
+ */
+export interface ExtensionPartition {
+  accepted: string[]
+  rejected: string[]
+}
+
+export function partitionMkvPaths(paths: string[]): ExtensionPartition {
+  const accepted: string[] = []
+  const rejected: string[] = []
+  for (const p of paths) {
+    const lower = p.toLowerCase()
+    if (lower.endsWith('.mkv')) {
+      accepted.push(p)
+    } else {
+      rejected.push(basenameOf(p))
+    }
+  }
+  return { accepted, rejected }
+}
+
+/**
+ * Append Episodes to the currently open project from a flat list of
+ * source-MKV paths (typically produced by drag-drop or the "Thêm
+ * Episode…" multi-file picker).
+ *
+ * Surfaces three classes of feedback:
+ *  - **Red toast** per non-`.mkv` entry: AC string "Chỉ chấp nhận file
+ *    .mkv". Valid siblings in the same drop are NOT aborted — see AC.
+ *  - **Yellow toast** per duplicate `source_mkv_path`: AC string
+ *    "Episode này đã có trong project". Backend reports duplicates in
+ *    the `AddEpisodesOutcome.duplicates` list.
+ *  - **Red toast** with the raw error message on backend failure (e.g.
+ *    folder write rejected, manifest unwritable).
+ *
+ * Returns the outcome for any caller that wants to log it; UI consumers
+ * can ignore the return because all user-visible feedback flows through
+ * toasts and the in-memory `active` state.
+ */
+export async function addEpisodes(paths: string[]): Promise<AddEpisodesOutcome | null> {
+  const folder = state.activeFolder
+  if (!folder) return null
+
+  const { accepted, rejected } = partitionMkvPaths(paths)
+  for (const name of rejected) {
+    pushDangerToast(`Chỉ chấp nhận file .mkv (đã bỏ qua "${name}")`)
+  }
+  if (accepted.length === 0) return null
+
+  try {
+    const outcome = await projectAddEpisodes(folder, accepted)
+    setState({ active: outcome.project })
+    for (const dup of outcome.duplicates) {
+      pushWarnToast(`Episode này đã có trong project: ${basenameOf(dup)}`)
+    }
+    return outcome
+  } catch (err) {
+    pushDangerToast(`Không thêm được Episode: ${messageOf(err)}`)
+    return null
+  }
+}
+
+/**
+ * Last path segment of `p`, with both Windows backslash and forward
+ * slash treated as separators. Mirrors the helper used by `Sidebar.tsx`
+ * — kept local to avoid leaking a path util into a shared module before
+ * it's needed in more than two places.
+ */
+function basenameOf(p: string): string {
+  const normalised = p.replace(/[\\/]+$/, '')
+  const idx = Math.max(normalised.lastIndexOf('\\'), normalised.lastIndexOf('/'))
+  return idx >= 0 ? normalised.slice(idx + 1) : normalised
 }
 
 function messageOf(err: unknown): string {

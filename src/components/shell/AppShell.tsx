@@ -1,13 +1,16 @@
+import DropOverlay from '@components/drop-overlay/DropOverlay'
 import EmptyProjectsState from '@components/shell/EmptyProjectsState'
 import Sidebar from '@components/shell/Sidebar'
 import StatusBar from '@components/shell/StatusBar'
+import ToastStack from '@design-system/ToastStack'
 import { installGlobalShortcuts } from '@lib/keyboard/globalShortcuts'
 import { useKeyboardShortcut } from '@lib/keyboard/useKeyboardShortcut'
-import { bootstrapActiveProject, projectsStore } from '@stores/projects'
+import { addEpisodes, bootstrapActiveProject, projectsStore } from '@stores/projects'
 import { allReady, bootstrapTools, toolsStore } from '@stores/tools'
+import { getCurrentWebview } from '@tauri-apps/api/webview'
+import OnboardingView from '@views/onboarding/OnboardingView'
 import CreateProjectModal from '@views/project/CreateProjectModal'
 import ProjectView from '@views/project/ProjectView'
-import OnboardingView from '@views/onboarding/OnboardingView'
 import SettingsModal from '@views/settings/SettingsModal'
 import { Loader2 } from 'lucide-solid'
 import {
@@ -46,6 +49,7 @@ import {
 const AppShell: Component = () => {
   const [settingsOpen, setSettingsOpen] = createSignal(false)
   const [createProjectOpen, setCreateProjectOpen] = createSignal(false)
+  const [dragOverlayVisible, setDragOverlayVisible] = createSignal(false)
 
   onMount(() => {
     const dispose = installGlobalShortcuts()
@@ -66,6 +70,62 @@ const AppShell: Component = () => {
       }
     )
   )
+
+  // Tauri drag-drop subscription. The handler is bound once per AppShell
+  // mount and ignores events whenever the project gate is not satisfied
+  // (Onboarding running, or no Project open) so dragging files into the
+  // app during Onboarding doesn't pop the overlay. The active-project
+  // check is read live inside the callback rather than wired through a
+  // Solid effect because the Tauri callback is not a reactive scope.
+  createEffect(() => {
+    let unlisten: (() => void) | undefined
+    let cancelled = false
+    void (async () => {
+      try {
+        const u = await getCurrentWebview().onDragDropEvent(event => {
+          const payload = event.payload
+          const ready = allReady() && projectsStore.active !== null
+          if (!ready) {
+            // Make sure a stale overlay (e.g. user closed the project mid-
+            // drag) clears immediately rather than getting stuck.
+            if (dragOverlayVisible()) setDragOverlayVisible(false)
+            return
+          }
+          switch (payload.type) {
+            case 'enter':
+            case 'over':
+              if (!dragOverlayVisible()) setDragOverlayVisible(true)
+              break
+            case 'leave':
+              setDragOverlayVisible(false)
+              break
+            case 'drop':
+              setDragOverlayVisible(false)
+              if (payload.paths.length > 0) {
+                void addEpisodes(payload.paths)
+              }
+              break
+          }
+        })
+        if (cancelled) {
+          u()
+          return
+        }
+        unlisten = u
+      } catch (err) {
+        // Subscription fails on the dev server when webview is not yet
+        // available — log and move on; the next createEffect re-run will
+        // retry. We deliberately don't surface this as a user-visible
+        // toast because drag-drop is a quality-of-life feature, not a
+        // gating one.
+        console.error('Failed to bind drag-drop listener', err)
+      }
+    })()
+    onCleanup(() => {
+      cancelled = true
+      if (unlisten) unlisten()
+    })
+  })
 
   useKeyboardShortcut(
     'Ctrl+N',
@@ -109,8 +169,13 @@ const AppShell: Component = () => {
             open={createProjectOpen()}
             onClose={() => setCreateProjectOpen(false)}
           />
+          <DropOverlay
+            visible={dragOverlayVisible()}
+            onDismiss={() => setDragOverlayVisible(false)}
+          />
         </Match>
       </Switch>
+      <ToastStack />
     </div>
   )
 }

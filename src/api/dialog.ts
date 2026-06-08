@@ -19,3 +19,26 @@ export async function pickFolder(title: string): Promise<string | null> {
   if (typeof result === 'string') return result
   return null
 }
+
+/**
+ * Show the OS multi-file picker filtered to `.mkv`. Returns the array of
+ * absolute paths the user selected, or `[]` when they dismiss the dialog
+ * or pick nothing.
+ *
+ * Used by the "Thêm Episode…" button as an alternative to drag-drop —
+ * keyboard-only users follow this path. The MKV-only filter is enforced
+ * on the OS side; we do not re-check extensions on the result, but the
+ * caller still treats the returned list as untrusted user input and
+ * routes it through the same validation as drag-drop for consistency.
+ */
+export async function pickMkvFiles(title: string): Promise<string[]> {
+  const result = await pluginOpen({
+    directory: false,
+    multiple: true,
+    title,
+    filters: [{ name: 'MKV video', extensions: ['mkv'] }]
+  })
+  if (result === null) return []
+  if (Array.isArray(result)) return result
+  return [result]
+}

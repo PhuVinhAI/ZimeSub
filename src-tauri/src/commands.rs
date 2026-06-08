@@ -17,7 +17,9 @@ use tauri::{AppHandle, State};
 use tracing::error;
 
 use crate::install::{self, InstallRegistry};
-use crate::project_store::{self, FolderInspection, ProjectJson, RecentProjectStatus};
+use crate::project_store::{
+    self, AddEpisodesOutcome, FolderInspection, ProjectJson, RecentProjectStatus,
+};
 use crate::settings_store::{self, Settings};
 use crate::tooling::{self, RequiredTool, ToolReport};
 
@@ -186,6 +188,25 @@ pub fn project_list_recents(
         .collect();
 
     Ok(recents)
+}
+
+/// Append one Episode per entry in `source_paths` to the project at
+/// `folder`. Each accepted entry produces a new EpisodeFolder on disk and
+/// a new record in `episodes`; duplicates (same `source_mkv_path`,
+/// case-insensitive) are returned in the outcome's `duplicates` list so
+/// the frontend can show a yellow toast per skipped entry.
+///
+/// Frontend filters out non-`.mkv` paths before invoking — the AC keeps
+/// the validation in the UI so the toast text can carry the offending
+/// filename, and so a future "Add Episode…" multi-file picker that
+/// already constrains by extension can call this command without
+/// re-checking.
+#[tauri::command]
+pub fn project_add_episodes(
+    folder: String,
+    source_paths: Vec<String>,
+) -> Result<AddEpisodesOutcome, String> {
+    project_store::add_episodes(Path::new(&folder), &source_paths).map_err(|e| e.to_string())
 }
 
 /// Drop one entry from `recent_projects`. Wired to the "Gỡ khỏi danh

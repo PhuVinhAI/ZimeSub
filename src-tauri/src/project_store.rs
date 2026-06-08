@@ -1,6 +1,6 @@
 //! Project file (`zimesub.json`) read/write + folder inspection.
 //!
-//! Slice 0004 ships:
+//! Slice 0004 shipped:
 //!  * The on-disk [`ProjectJson`] schema (version 1) per
 //!    PRD § "Schemas / zimesub.json".
 //!  * [`inspect_folder`] — three-way verdict the Create Project modal uses
@@ -8,9 +8,16 @@
 //!  * [`create_project`] / [`open_project`] — single-shot helpers wrapped by
 //!    the Tauri commands in `commands.rs`.
 //!
-//! Episode lifecycle (add/remove/relocate/select-track) lands in later slices;
-//! the `episodes: Vec<EpisodeRecord>` field is wired into the schema now so
-//! future slices don't have to retrofit it.
+//! Slice 0005 adds:
+//!  * [`sanitize_folder_name`] — Windows-reserved character substitution per
+//!    PRD § "Episode import" / CONTEXT.md § "EpisodeFolder". Pure, fixture-
+//!    testable; the same rule is applied by both drag-drop and the multi-
+//!    file picker so the basename → folder_name mapping is one definition.
+//!  * [`add_episodes`] — batch append of Episode records driven by drag-drop
+//!    or the "Thêm Episode…" button. Creates the on-disk EpisodeFolder per
+//!    accepted entry, deduplicates against existing `source_mkv_path` entries
+//!    (case-insensitive — Windows-only target), and reports duplicates back
+//!    to the caller so the UI can surface a yellow toast.
 
 use std::fs;
 use std::io;
@@ -19,6 +26,7 @@ use std::path::{Path, PathBuf};
 use chrono::Local;
 use chrono::SecondsFormat;
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
 /// File name of the project manifest. The whole pipeline keys off the
 /// presence of this file inside a folder — `inspect_folder` looks for it,
@@ -281,6 +289,155 @@ pub fn folder_has_manifest(folder: &Path) -> bool {
     folder.join(PROJECT_FILE_NAME).is_file()
 }
 
+/// Return value of [`add_episodes`].
+///
+/// `project` is the post-write [`ProjectJson`] so the frontend can swap its
+/// `active` reference without a second `open_project` round-trip.
+/// `added_count` lets the UI render a "đã thêm N Episode" status without
+/// counting the diff. `duplicates` is the list of input paths that were
+/// already present in `episodes` and therefore skipped — the UI surfaces
+/// one yellow toast per entry per the slice 0005 acceptance criteria.
+#[derive(Clone, Debug, Serialize)]
+pub struct AddEpisodesOutcome {
+    pub project: ProjectJson,
+    pub added_count: u32,
+    pub duplicates: Vec<String>,
+}
+
+/// Replace Windows-reserved characters in `basename` with `_`.
+///
+/// Reserved set per PRD / CONTEXT.md: `: < > | " \ / ? *`. Trailing dots and
+/// trailing whitespace are also stripped because Windows refuses folders
+/// that end with either (a long-standing NTFS quirk that turns into a
+/// cryptic `CreateDirectory` failure otherwise). Empty / all-replaced input
+/// falls back to `"episode"` so we never pass an empty string to
+/// `create_dir_all`.
+///
+/// Pure function — no I/O, no allocation beyond the result `String`.
+pub fn sanitize_folder_name(basename: &str) -> String {
+    let mut out = String::with_capacity(basename.len());
+    for ch in basename.chars() {
+        match ch {
+            ':' | '<' | '>' | '|' | '"' | '\\' | '/' | '?' | '*' => out.push('_'),
+            // ASCII control chars are also illegal on Windows. Replacing them
+            // is cheap insurance against pathological filenames.
+            c if (c as u32) < 0x20 => out.push('_'),
+            c => out.push(c),
+        }
+    }
+    let trimmed = out.trim_end_matches([' ', '.']);
+    if trimmed.is_empty() {
+        "episode".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+/// Strip the `.mkv` (case-insensitive) extension off the basename of
+/// `path`. Used to derive a sanitized [`EpisodeRecord::folder_name`] from
+/// the absolute SourceMkv path.
+fn basename_without_mkv_ext(path: &Path) -> String {
+    let raw = path
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    if let Some(stripped) = raw.strip_suffix(".mkv").or_else(|| raw.strip_suffix(".MKV")) {
+        return stripped.to_string();
+    }
+    // Fall back to the case-insensitive form for mixed-case extensions.
+    let lower = raw.to_lowercase();
+    if let Some(idx) = lower.rfind(".mkv")
+        && idx + ".mkv".len() == raw.len()
+    {
+        return raw[..idx].to_string();
+    }
+    raw
+}
+
+/// Append one `Episode` per entry in `source_paths` to the project at
+/// `folder`, creating the matching EpisodeFolder for each on disk.
+///
+/// Duplicate detection: an input path that already appears in
+/// `episodes[*].source_mkv_path` (case-insensitive comparison — Windows
+/// is the only target platform per the v1 PRD) is reported in
+/// `duplicates` and **not** appended again. The corresponding subfolder
+/// is also not re-created (it already exists from the original add).
+///
+/// File-system writes:
+///  * `<folder>/<sanitised_basename>/` — created via `create_dir_all`,
+///    so an existing subfolder is treated as a no-op rather than an error.
+///  * `<folder>/zimesub.json` — rewritten atomically (tmp + rename) only
+///    when at least one Episode was appended. If every input was a
+///    duplicate the manifest is left untouched.
+///
+/// Errors:
+///  * `ProjectError::NotAProject` — `folder/zimesub.json` does not exist
+///    or is unreadable. The frontend should never reach this state with a
+///    project_open round-trip beforehand, so we return the same kind the
+///    Sidebar already maps to "Không tìm thấy".
+///  * `ProjectError::Io` — folder creation or manifest write failed mid-
+///    batch. Episodes appended to the in-memory `ProjectJson` before the
+///    failure are NOT persisted; the caller should re-open the project
+///    to recover the on-disk truth.
+pub fn add_episodes(
+    folder: &Path,
+    source_paths: &[String],
+) -> Result<AddEpisodesOutcome, ProjectError> {
+    let mut project = open_project(folder)?;
+
+    let mut existing_lower: std::collections::HashSet<String> = project
+        .episodes
+        .iter()
+        .map(|e| e.source_mkv_path.to_lowercase())
+        .collect();
+
+    let mut added_count: u32 = 0;
+    let mut duplicates: Vec<String> = Vec::new();
+
+    for source_path in source_paths {
+        let trimmed = source_path.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let lower = trimmed.to_lowercase();
+        if existing_lower.contains(&lower) {
+            duplicates.push(trimmed.to_string());
+            continue;
+        }
+
+        let path = Path::new(trimmed);
+        let basename = basename_without_mkv_ext(path);
+        let folder_name = sanitize_folder_name(&basename);
+        let episode_folder = folder.join(&folder_name);
+        // `create_dir_all` is idempotent — if two episodes happen to share a
+        // sanitised basename (unusual but legal: same name in different
+        // source directories), the second add reuses the existing folder.
+        // Pipeline artefacts inside collide on `<basename>` and that's
+        // surfaced as a v1 user responsibility per the PRD.
+        fs::create_dir_all(&episode_folder)?;
+
+        project.episodes.push(EpisodeRecord {
+            id: Uuid::new_v4().to_string(),
+            source_mkv_path: trimmed.to_string(),
+            folder_name,
+            selected_subtitle_track_id: None,
+            render_config_override: None,
+        });
+        existing_lower.insert(lower);
+        added_count += 1;
+    }
+
+    if added_count > 0 {
+        write_project_json_atomic(folder, &project)?;
+    }
+
+    Ok(AddEpisodesOutcome {
+        project,
+        added_count,
+        duplicates,
+    })
+}
+
 fn read_project_json(path: &Path) -> Result<ProjectJson, ProjectError> {
     let text = fs::read_to_string(path)?;
     let project: ProjectJson = serde_json::from_str(&text)?;
@@ -444,5 +601,184 @@ mod tests {
         assert!(stamp.len() >= 25);
         assert!(stamp.contains('T'));
         assert!(stamp.contains('+') || stamp.contains('-') || stamp.ends_with('Z'));
+    }
+
+    #[test]
+    fn sanitize_replaces_each_reserved_char() {
+        // Every Windows-reserved character listed in PRD § "Episode import"
+        // becomes `_`; everything else passes through unchanged.
+        let input = r#"name: <weird> | "name" / good \ ? *"#;
+        let got = sanitize_folder_name(input);
+        assert_eq!(got, "name_ _weird_ _ _name_ _ good _ _ _");
+    }
+
+    #[test]
+    fn sanitize_keeps_brackets_and_unicode() {
+        // Anime release groups habitually use square brackets and unicode
+        // (e.g. `[Erai-raws]`, dashes); none of those are reserved on
+        // Windows and must round-trip unchanged.
+        let input = "[Erai-raws] Oi Tonbo - 01 [1080p][HEVC][1E1E044E]";
+        assert_eq!(sanitize_folder_name(input), input);
+    }
+
+    #[test]
+    fn sanitize_strips_trailing_dots_and_spaces() {
+        // Windows refuses to create folders ending in `.` or ` ` (NTFS
+        // quirk) — the helper trims them so the EpisodeFolder write
+        // doesn't fall over with a cryptic OS error.
+        assert_eq!(sanitize_folder_name("Show 01.   "), "Show 01");
+        assert_eq!(sanitize_folder_name("Show 01..."), "Show 01");
+    }
+
+    #[test]
+    fn sanitize_falls_back_when_input_is_empty_or_all_reserved() {
+        assert_eq!(sanitize_folder_name(""), "episode");
+        assert_eq!(sanitize_folder_name("...   "), "episode");
+        assert_eq!(sanitize_folder_name("////"), "____");
+    }
+
+    #[test]
+    fn add_episodes_writes_records_and_creates_folders() {
+        let dir = temp_dir_for_test("add-episodes-happy");
+        create_project(&dir, "AddTest").expect("create");
+
+        let mkv_a = dir
+            .parent()
+            .unwrap()
+            .join(format!("zimesub-source-a-{}.mkv", std::process::id()));
+        let mkv_b = dir
+            .parent()
+            .unwrap()
+            .join(format!("zimesub-source-b-{}.mkv", std::process::id()));
+        let inputs = vec![
+            mkv_a.to_string_lossy().into_owned(),
+            mkv_b.to_string_lossy().into_owned(),
+        ];
+
+        let outcome = add_episodes(&dir, &inputs).expect("add");
+        assert_eq!(outcome.added_count, 2);
+        assert!(outcome.duplicates.is_empty());
+        assert_eq!(outcome.project.episodes.len(), 2);
+
+        let on_disk = read_project_json(&dir.join(PROJECT_FILE_NAME)).expect("re-read");
+        assert_eq!(on_disk.episodes.len(), 2);
+        for ep in &on_disk.episodes {
+            assert!(!ep.id.is_empty(), "episode id must be uuid v4");
+            assert!(ep.selected_subtitle_track_id.is_none());
+            assert!(ep.render_config_override.is_none());
+            assert!(dir.join(&ep.folder_name).is_dir(), "EpisodeFolder must exist");
+        }
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn add_episodes_skips_duplicate_source_paths_case_insensitive() {
+        let dir = temp_dir_for_test("add-episodes-dup");
+        create_project(&dir, "DupTest").expect("create");
+
+        let original = "C:\\Users\\me\\Anime\\Show - 01.mkv".to_string();
+        let outcome = add_episodes(&dir, std::slice::from_ref(&original)).expect("add first");
+        assert_eq!(outcome.added_count, 1);
+
+        // Second add with the same path (different casing) is treated as a
+        // duplicate, reported back to the caller, and not appended.
+        let differently_cased = "c:\\Users\\me\\Anime\\Show - 01.MKV".to_string();
+        let outcome = add_episodes(&dir, std::slice::from_ref(&differently_cased)).expect("add dup");
+        assert_eq!(outcome.added_count, 0);
+        assert_eq!(outcome.duplicates.len(), 1);
+        assert_eq!(outcome.project.episodes.len(), 1);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn add_episodes_does_not_rewrite_manifest_when_all_inputs_are_duplicates() {
+        let dir = temp_dir_for_test("add-episodes-noop");
+        create_project(&dir, "NoopTest").expect("create");
+
+        let path = "C:\\Anime\\Test - 01.mkv".to_string();
+        add_episodes(&dir, std::slice::from_ref(&path)).expect("first add");
+
+        let manifest_path = dir.join(PROJECT_FILE_NAME);
+        let mtime_before = fs::metadata(&manifest_path).expect("meta").modified().expect("mt");
+
+        // Sleep a beat so a hypothetical rewrite would tick mtime on file
+        // systems with second-resolution timestamps.
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+
+        let outcome = add_episodes(&dir, std::slice::from_ref(&path)).expect("second add");
+        assert_eq!(outcome.added_count, 0);
+        assert_eq!(outcome.duplicates.len(), 1);
+
+        let mtime_after = fs::metadata(&manifest_path).expect("meta").modified().expect("mt");
+        assert_eq!(
+            mtime_before, mtime_after,
+            "manifest must not be rewritten when no episodes were added"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn add_episodes_partial_batch_keeps_valid_siblings() {
+        let dir = temp_dir_for_test("add-episodes-partial");
+        create_project(&dir, "PartialTest").expect("create");
+
+        let first = "C:\\Anime\\Already.mkv".to_string();
+        add_episodes(&dir, std::slice::from_ref(&first)).expect("preload");
+
+        let inputs = vec![
+            "C:\\Anime\\Already.mkv".to_string(),
+            "C:\\Anime\\NewOne.mkv".to_string(),
+            "C:\\Anime\\NewTwo.mkv".to_string(),
+        ];
+        let outcome = add_episodes(&dir, &inputs).expect("add mixed");
+        assert_eq!(outcome.added_count, 2);
+        assert_eq!(outcome.duplicates.len(), 1);
+        assert_eq!(outcome.project.episodes.len(), 3);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn add_episodes_errors_when_project_is_missing() {
+        let dir = temp_dir_for_test("add-episodes-missing");
+        // No create_project call — manifest absent.
+        let path = "C:\\Anime\\X.mkv".to_string();
+        let err = add_episodes(&dir, std::slice::from_ref(&path)).unwrap_err();
+        assert!(matches!(err, ProjectError::NotAProject));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn add_episodes_strips_mkv_extension_for_folder_name() {
+        let dir = temp_dir_for_test("add-episodes-folder-name");
+        create_project(&dir, "FolderNameTest").expect("create");
+
+        let inputs = vec!["C:\\Anime\\Show - 01.mkv".to_string()];
+        let outcome = add_episodes(&dir, &inputs).expect("add");
+        assert_eq!(outcome.added_count, 1);
+        assert_eq!(outcome.project.episodes[0].folder_name, "Show - 01");
+        assert!(dir.join("Show - 01").is_dir());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn add_episodes_sanitises_reserved_chars_in_folder_name() {
+        let dir = temp_dir_for_test("add-episodes-reserved");
+        create_project(&dir, "ReservedTest").expect("create");
+
+        // Path component that uses backslash-escape but contains some
+        // reserved characters in the basename itself (not the path separator).
+        let inputs = vec![r#"C:\Anime\name: with <reserved> | "stuff".mkv"#.to_string()];
+        let outcome = add_episodes(&dir, &inputs).expect("add");
+        assert_eq!(outcome.added_count, 1);
+        let ep = &outcome.project.episodes[0];
+        assert!(!ep.folder_name.contains([':', '<', '>', '|', '"']));
+        assert!(dir.join(&ep.folder_name).is_dir());
+
+        let _ = fs::remove_dir_all(&dir);
     }
 }
