@@ -39,14 +39,15 @@
 //!    or failed completion of a Running job):
 //!     * `ExtractSubtitle` → `<basename>.eng.ass`
 //!     * `ExtractAudio`    → `<basename>.<configured-ext>`  (mp3/aac/flac per slice 0009)
-//!     * `Render`          → `<basename>.VietSub.mp4` (render runner lands in 0011)
+//!     * `Render`          → `<basename>.VietSub.mp4` (slice 0011)
 //!
-//! Slice 0009 wires the `ExtractAudio` runnable spec — ffmpeg with
-//! `-vn -c:a <codec> <quality-args> <basename>.<ext>`, cwd =
-//! EpisodeFolder. Total duration is queried up-front via
-//! `mkvmerge -J` or `ffprobe` (whichever is available) and combined
-//! with ffmpeg's stderr `time=` token to produce the same `[0, 1]`
-//! ratio surface as the subtitle extract pipeline.
+//! Slice 0011 wires the `Render` runnable spec: ffmpeg with
+//! `-i <abs source_mkv_path> -vf subtitles=<basename>.vietsub.ass
+//! -c:v <encoder> <quality-flag> -c:a aac -b:a <bitrate>k -y
+//! <basename>.VietSub.mp4`, cwd = EpisodeFolder. The subtitles filter
+//! argument is the relative ASS filename per ADR-0004 so Windows path
+//! escaping is avoided. Progress is driven by the same parser stack
+//! the audio extract uses (`parse_ffmpeg_time_us` + a duration probe).
 
 use std::path::PathBuf;
 use std::process::Stdio;
@@ -106,8 +107,7 @@ pub enum JobKind {
     ExtractSubtitle,
     /// Audio extract — runnable spec wired in slice 0009.
     ExtractAudio,
-    /// Hardsub render — runnable spec lands in slice 0011.
-    #[allow(dead_code)]
+    /// Hardsub render — runnable spec wired in slice 0011.
     Render,
 }
 
@@ -185,15 +185,54 @@ pub struct ExtractAudioSpec {
     pub quality_args: Vec<String>,
 }
 
+/// Concrete spec for a `Render` job. Slice 0011.
+///
+/// All paths are absolute. The ffmpeg argv assembled by the runner is:
+///
+/// ```text
+/// -hide_banner -i <source_mkv_path>
+///   -vf subtitles=<basename>.vietsub.ass
+///   -c:v <encoder> <video_quality_args ...>
+///   -c:a aac -b:a <audio_bitrate>k
+///   -y <basename>.VietSub.mp4
+/// ```
+///
+/// with `cwd = episode_folder` so the `subtitles=` filter receives a
+/// relative path (per ADR-0004 — Windows path quirks in the
+/// `subtitles=` filter are avoided when cwd is the EpisodeFolder).
+///
+/// `encoder` is the resolved canonical key (`h264_qsv` / `h264_nvenc`
+/// / `h264_amf` / `libx264`) — the commands layer runs the
+/// EncoderProbe resolution before queueing so the runner never has to
+/// know about `"auto"` or fallback toasts.
+///
+/// `mkvmerge_path` is `Option` so the runner falls back to ffprobe
+/// gracefully when mkvmerge has been wiped from the cache.
+#[derive(Clone, Debug)]
+pub struct RenderSpec {
+    pub job_id: String,
+    pub episode_id: String,
+    pub episode_name: String,
+    pub project_folder: PathBuf,
+    pub ffmpeg_path: PathBuf,
+    pub mkvmerge_path: Option<PathBuf>,
+    pub source_mkv_path: PathBuf,
+    pub episode_folder: PathBuf,
+    pub output_basename: String,
+    pub encoder: String,
+    pub video_quality_args: Vec<String>,
+    pub audio_bitrate_kbps: u32,
+}
+
 /// Per-kind runnable specs.
 ///
 /// Slice 0008 shipped only the subtitle variant; slice 0009 adds
-/// audio. The `Render` runner lands in slice 0011 and will add a
-/// third variant alongside.
+/// audio. Slice 0011 adds the [`JobSpec::Render`] variant alongside.
 #[derive(Clone, Debug)]
 pub enum JobSpec {
     ExtractSubtitle(ExtractSubtitleSpec),
     ExtractAudio(ExtractAudioSpec),
+    Render(RenderSpec),
 }
 
 impl JobSpec {
@@ -201,6 +240,7 @@ impl JobSpec {
         match self {
             JobSpec::ExtractSubtitle(_) => JobKind::ExtractSubtitle,
             JobSpec::ExtractAudio(_) => JobKind::ExtractAudio,
+            JobSpec::Render(_) => JobKind::Render,
         }
     }
 
@@ -208,6 +248,7 @@ impl JobSpec {
         match self {
             JobSpec::ExtractSubtitle(s) => &s.job_id,
             JobSpec::ExtractAudio(s) => &s.job_id,
+            JobSpec::Render(s) => &s.job_id,
         }
     }
 
@@ -215,6 +256,7 @@ impl JobSpec {
         match self {
             JobSpec::ExtractSubtitle(s) => &s.episode_id,
             JobSpec::ExtractAudio(s) => &s.episode_id,
+            JobSpec::Render(s) => &s.episode_id,
         }
     }
 
@@ -222,6 +264,7 @@ impl JobSpec {
         match self {
             JobSpec::ExtractSubtitle(s) => &s.episode_name,
             JobSpec::ExtractAudio(s) => &s.episode_name,
+            JobSpec::Render(s) => &s.episode_name,
         }
     }
 
@@ -229,6 +272,7 @@ impl JobSpec {
         match self {
             JobSpec::ExtractSubtitle(s) => s.project_folder.clone(),
             JobSpec::ExtractAudio(s) => s.project_folder.clone(),
+            JobSpec::Render(s) => s.project_folder.clone(),
         }
     }
 }
@@ -667,6 +711,15 @@ fn spawn_runner(queue: Arc<JobQueue>, job_id: String) {
                 )
                 .await
             }
+            JobSpec::Render(spec) => {
+                run_render(
+                    queue.app.clone(),
+                    spec,
+                    input.cancel_notify,
+                    input.cancelled_flag,
+                )
+                .await
+            }
         };
 
         apply_terminal_outcome(&queue, &job_id, outcome).await;
@@ -1000,6 +1053,349 @@ async fn run_extract_audio(
         exit_code: supervised.exit_code,
         cancelled: supervised.cancelled,
     }
+}
+
+/// Run one `Render` job to completion (success, failure, or
+/// cancellation). Slice 0011.
+///
+/// Flow:
+///  1. Probe the source duration the same way the audio extract does
+///     (mkvmerge -J → ffprobe → indeterminate fallback).
+///  2. Spawn ffmpeg with the argv specified in [`RenderSpec`], cwd =
+///     EpisodeFolder. The `subtitles=` filter receives just the
+///     relative `<basename>.vietsub.ass` filename to avoid Windows
+///     path escaping (ADR-0004).
+///  3. Per stderr line: same parser as the audio path — ffmpeg's
+///     status row uses the same `time=HH:MM:SS.cs` token whether the
+///     output is audio-only or full video.
+///  4. Cancel + cleanup mirrors the audio pipeline; the `.VietSub.mp4`
+///     partial is removed on any non-success exit.
+async fn run_render(
+    app: AppHandle,
+    spec: RenderSpec,
+    cancel: Arc<Notify>,
+    cancelled: Arc<AtomicBool>,
+) -> TerminalOutcome {
+    let output_path = spec
+        .episode_folder
+        .join(format!("{}.VietSub.mp4", spec.output_basename));
+
+    if cancelled.load(Ordering::SeqCst) {
+        return TerminalOutcome {
+            status: JobStatus::Cancelled,
+            ratio: 0.0,
+            hint: String::new(),
+            error: None,
+            stderr: String::new(),
+            exit_code: None,
+            cancelled: true,
+        };
+    }
+
+    let total_duration_us = probe_render_total_duration(&spec).await;
+
+    // Relative subtitles filter argument — ADR-0004: keep the path
+    // relative so the `subtitles=` filter doesn't have to escape
+    // Windows backslashes / drive letters.
+    let subtitles_filter = format!("subtitles={}.vietsub.ass", spec.output_basename);
+
+    let mut args: Vec<String> = Vec::with_capacity(16 + spec.video_quality_args.len());
+    args.push("-hide_banner".into());
+    args.push("-y".into());
+    args.push("-i".into());
+    args.push(spec.source_mkv_path.to_string_lossy().into_owned());
+    args.push("-vf".into());
+    args.push(subtitles_filter);
+    args.push("-c:v".into());
+    args.push(spec.encoder.clone());
+    args.extend(spec.video_quality_args.iter().cloned());
+    args.push("-c:a".into());
+    args.push("aac".into());
+    args.push("-b:a".into());
+    args.push(format!("{}k", spec.audio_bitrate_kbps));
+    args.push(format!("{}.VietSub.mp4", spec.output_basename));
+
+    info!(
+        job_id = spec.job_id,
+        episode_id = spec.episode_id,
+        encoder = spec.encoder,
+        source = %spec.source_mkv_path.display(),
+        output = %output_path.display(),
+        duration_us = total_duration_us.unwrap_or(0),
+        "starting render job"
+    );
+
+    let mut cmd = Command::new(&spec.ffmpeg_path);
+    cmd.args(&args)
+        .current_dir(&spec.episode_folder)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt as _;
+        cmd.as_std_mut().creation_flags(CREATE_NO_WINDOW);
+    }
+
+    let child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) => {
+            let msg = format!("Không khởi chạy được ffmpeg: {e}");
+            error!(job_id = spec.job_id, error = %e, "ffmpeg render spawn failed");
+            return TerminalOutcome {
+                status: JobStatus::Failed,
+                ratio: 0.0,
+                hint: String::new(),
+                error: Some(msg),
+                stderr: String::new(),
+                exit_code: None,
+                cancelled: false,
+            };
+        }
+    };
+
+    let supervised = supervise_render(
+        app.clone(),
+        &spec,
+        child,
+        cancel,
+        cancelled,
+        total_duration_us,
+    )
+    .await;
+
+    if !supervised.success {
+        cleanup_partial_output_for_render(&spec.episode_folder, &spec.output_basename);
+    }
+
+    info!(
+        job_id = spec.job_id,
+        episode_id = spec.episode_id,
+        success = supervised.success,
+        cancelled = supervised.cancelled,
+        exit_code = ?supervised.exit_code,
+        "render job finished"
+    );
+
+    let status = if supervised.cancelled {
+        JobStatus::Cancelled
+    } else if supervised.success {
+        JobStatus::Done
+    } else {
+        JobStatus::Failed
+    };
+
+    TerminalOutcome {
+        status,
+        ratio: if supervised.success { 1.0 } else { supervised.ratio },
+        hint: supervised.hint,
+        error: supervised.error,
+        stderr: supervised.stderr,
+        exit_code: supervised.exit_code,
+        cancelled: supervised.cancelled,
+    }
+}
+
+/// Run the up-front duration probe via mkvmerge → ffprobe for the
+/// render runner. Same fallback chain as the audio extract; kept as a
+/// separate function so the spec type difference doesn't force the
+/// audio helper to take a trait object.
+async fn probe_render_total_duration(spec: &RenderSpec) -> Option<u64> {
+    if let Some(mkvmerge_path) = spec.mkvmerge_path.clone() {
+        let source = spec.source_mkv_path.clone();
+        let probe_result = tokio::task::spawn_blocking(move || {
+            duration_probe::probe_duration_via_mkvmerge(&mkvmerge_path, &source)
+        })
+        .await
+        .ok()
+        .flatten();
+        if let Some(us) = probe_result {
+            return Some(us);
+        }
+    }
+    let ffprobe = duration_probe::ffprobe_path_from_ffmpeg(&spec.ffmpeg_path)?;
+    let source = spec.source_mkv_path.clone();
+    tokio::task::spawn_blocking(move || {
+        duration_probe::probe_duration_via_ffprobe(&ffprobe, &source)
+    })
+    .await
+    .ok()
+    .flatten()
+}
+
+/// Drive the ffmpeg render child to completion. Same shape as
+/// [`supervise_audio`]; kept as a separate function so the `&spec`
+/// type is concrete (no dyn-dispatch on the spec struct).
+async fn supervise_render(
+    app: AppHandle,
+    spec: &RenderSpec,
+    mut child: tokio::process::Child,
+    cancel: Arc<Notify>,
+    cancelled: Arc<AtomicBool>,
+    initial_total_us: Option<u64>,
+) -> Supervised {
+    let stderr = child.stderr.take().expect("piped above; take-once contract");
+    let stdout = child.stdout.take().expect("piped above; take-once contract");
+
+    let stderr_buf: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));
+    let progress_buf: Arc<Mutex<(f32, String)>> = Arc::new(Mutex::new((0.0, String::new())));
+    let total_us: Arc<Mutex<Option<u64>>> = Arc::new(Mutex::new(initial_total_us));
+
+    let stderr_buf_for_task = stderr_buf.clone();
+    let progress_buf_for_task = progress_buf.clone();
+    let total_us_for_task = total_us.clone();
+    let app_for_stderr = app.clone();
+    let job_id_for_stderr = spec.job_id.clone();
+
+    let stderr_task = tauri::async_runtime::spawn(async move {
+        let mut lines = BufReader::new(stderr).lines();
+        let mut indeterminate_count: u64 = 0;
+        loop {
+            match lines.next_line().await {
+                Ok(Some(line)) => {
+                    {
+                        let mut buf = stderr_buf_for_task.lock().await;
+                        buf.push_str(&line);
+                        buf.push('\n');
+                    }
+                    let mut have_total = {
+                        let guard = total_us_for_task.lock().await;
+                        guard.is_some()
+                    };
+                    if !have_total
+                        && let Some(parsed) = progress_parsers::parse_ffmpeg_duration(&line)
+                    {
+                        let mut guard = total_us_for_task.lock().await;
+                        if guard.is_none() {
+                            *guard = Some(parsed);
+                            have_total = true;
+                        }
+                    }
+
+                    if let Some(elapsed_us) = progress_parsers::parse_ffmpeg_time_us(&line) {
+                        let total_opt = {
+                            let guard = total_us_for_task.lock().await;
+                            *guard
+                        };
+                        let update = if let Some(total) = total_opt {
+                            progress_parsers::ffmpeg_progress(elapsed_us, total)
+                        } else {
+                            indeterminate_count += 1;
+                            progress_parsers::ProgressUpdate {
+                                ratio: 0.0,
+                                hint: format!("Đang render (~{indeterminate_count})"),
+                            }
+                        };
+                        {
+                            let mut latest = progress_buf_for_task.lock().await;
+                            *latest = (update.ratio, update.hint.clone());
+                        }
+                        emit_progress(
+                            &app_for_stderr,
+                            &job_id_for_stderr,
+                            update.ratio,
+                            update.hint,
+                        );
+                    } else if !have_total && !line.trim().is_empty() {
+                        indeterminate_count += 1;
+                        let update = progress_parsers::ProgressUpdate {
+                            ratio: 0.0,
+                            hint: format!("Đang chuẩn bị (~{indeterminate_count})"),
+                        };
+                        {
+                            let mut latest = progress_buf_for_task.lock().await;
+                            *latest = (update.ratio, update.hint.clone());
+                        }
+                        emit_progress(
+                            &app_for_stderr,
+                            &job_id_for_stderr,
+                            update.ratio,
+                            update.hint,
+                        );
+                    }
+                }
+                Ok(None) => break,
+                Err(e) => {
+                    warn!(error = %e, "render stderr reader failed");
+                    break;
+                }
+            }
+        }
+    });
+
+    let stdout_task = tauri::async_runtime::spawn(async move {
+        let mut lines = BufReader::new(stdout).lines();
+        while let Ok(Some(_)) = lines.next_line().await {}
+    });
+
+    let cancel_signal = cancel.notified();
+    tokio::pin!(cancel_signal);
+
+    let (exit_code, was_cancelled, runtime_error) = tokio::select! {
+        biased;
+        _ = &mut cancel_signal => {
+            warn!(job_id = spec.job_id, "render cancellation received");
+            let _ = child.start_kill();
+            match child.wait().await {
+                Ok(status) => (status.code(), true, None),
+                Err(e) => (None, true, Some(format!("Lỗi khi chờ ffmpeg thoát: {e}"))),
+            }
+        }
+        wait_result = child.wait() => {
+            match wait_result {
+                Ok(status) => {
+                    let was_cancelled = cancelled.load(Ordering::SeqCst);
+                    (status.code(), was_cancelled, None)
+                }
+                Err(e) => (None, false, Some(format!("Lỗi khi chờ ffmpeg thoát: {e}"))),
+            }
+        }
+    };
+
+    let _ = tokio::join!(stderr_task, stdout_task);
+
+    let stderr_text = {
+        let buf = stderr_buf.lock().await;
+        buf.clone()
+    };
+    let (ratio, hint) = {
+        let latest = progress_buf.lock().await;
+        latest.clone()
+    };
+
+    let success = !was_cancelled && exit_code == Some(0) && runtime_error.is_none();
+    let error_msg = runtime_error.or_else(|| {
+        if !success && !was_cancelled {
+            Some(match exit_code {
+                Some(c) => format!("ffmpeg trả về exit code {c}"),
+                None => "ffmpeg kết thúc bất thường".to_string(),
+            })
+        } else {
+            None
+        }
+    });
+
+    Supervised {
+        success,
+        cancelled: was_cancelled,
+        exit_code,
+        error: error_msg,
+        stderr: stderr_text,
+        ratio,
+        hint,
+    }
+}
+
+/// Delete the per-`JobKind` partial output file for Render. Slice 0011.
+/// Only the `<basename>.VietSub.mp4` artefact is in the cleanup list —
+/// the source mkv is read-only (path-only reference per ADR-0001) and
+/// the `<basename>.vietsub.ass` input lives next to other translate-
+/// stage artefacts the user may still need.
+fn cleanup_partial_output_for_render(episode_folder: &std::path::Path, basename: &str) {
+    let candidate = episode_folder.join(format!("{basename}.VietSub.mp4"));
+    delete_paths_silently(&[candidate]);
 }
 
 /// Drive the ffmpeg child to completion. Same shape as

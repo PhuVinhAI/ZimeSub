@@ -9,8 +9,13 @@ import {
   type AddEpisodesOutcome,
   type ExtractAudioConfig,
   type ProjectJson,
-  type RecentProjectStatus
+  type RecentProjectStatus,
+  type RenderConfig
 } from '@api/projects'
+import {
+  episodeSetRenderConfigOverride,
+  projectSetRenderConfig
+} from '@api/render'
 import { pushDangerToast, pushWarnToast } from '@lib/toast/toastStore'
 import { createStore } from 'solid-js/store'
 
@@ -280,6 +285,44 @@ export async function setExtractAudioConfig(config: ExtractAudioConfig): Promise
     setState({ active: project })
   } catch (err) {
     pushDangerToast(`Không lưu được cấu hình audio: ${messageOf(err)}`)
+    throw err instanceof Error ? err : new Error(messageOf(err))
+  }
+}
+
+/**
+ * Persist the project's `default_render_config` block. Slice 0011.
+ * Wired to the Settings modal render sub-form's commit path. Updates
+ * `state.active` so any downstream selector reading the project's
+ * defaults (e.g. the per-Episode form's "khôi phục mặc định" button)
+ * reflects the new values immediately.
+ */
+export async function setDefaultRenderConfig(config: RenderConfig): Promise<void> {
+  const folder = state.activeFolder
+  if (!folder) return
+  try {
+    const project = await projectSetRenderConfig(folder, config)
+    setState({ active: project })
+  } catch (err) {
+    pushDangerToast(`Không lưu được cấu hình render: ${messageOf(err)}`)
+    throw err instanceof Error ? err : new Error(messageOf(err))
+  }
+}
+
+/**
+ * Persist a per-Episode `render_config_override`. Passing `null`
+ * clears the override (restoring the project default). Slice 0011.
+ */
+export async function setRenderConfigOverride(
+  episodeId: string,
+  config: RenderConfig | null
+): Promise<void> {
+  const folder = state.activeFolder
+  if (!folder) return
+  try {
+    const project = await episodeSetRenderConfigOverride(folder, episodeId, config)
+    setState({ active: project })
+  } catch (err) {
+    pushDangerToast(`Không lưu được override render: ${messageOf(err)}`)
     throw err instanceof Error ? err : new Error(messageOf(err))
   }
 }

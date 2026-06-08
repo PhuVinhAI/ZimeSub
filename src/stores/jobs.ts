@@ -15,7 +15,13 @@ import {
   type JobsSnapshot,
   type JobView
 } from '@api/jobs'
-import { pushDangerToast } from '@lib/toast/toastStore'
+import {
+  ENCODER_LABELS,
+  renderStart,
+  type EncoderKey,
+  type RenderStartOutcome
+} from '@api/render'
+import { pushDangerToast, pushWarnToast } from '@lib/toast/toastStore'
 import { DEFAULT_EXTRACT_CONCURRENCY } from '@stores/settings'
 import type { UnlistenFn } from '@tauri-apps/api/event'
 import { createMemo } from 'solid-js'
@@ -335,6 +341,75 @@ export async function cancelExtractAudio(episodeId: string): Promise<void> {
   }
 }
 
+/** Session-only memory of which `(configured → fallback)` pairs have
+ *  already triggered the warn toast. Per AC: "show a one-time toast"
+ *  — once per pair per session, not once per Episode. */
+const encoderFallbackToastShown = new Set<string>()
+
+/**
+ * Enqueue a fresh `Render` job for `episodeId`. Slice 0011.
+ *
+ * Idempotent for back-to-back clicks while a render job is already
+ * in flight; per ADR-0003 the queue itself only allows 1 Render
+ * Running at a time so a second click on a different Episode just
+ * queues — only same-Episode duplicates are filtered here.
+ *
+ * Surfaces the AC's encoder-fallback warn toast when the backend
+ * reports `fallback_from != null`. The toast fires exactly once per
+ * (configured, chosen) pair per session.
+ */
+export async function startRender(episodeId: string): Promise<void> {
+  const folder = state.activeFolder
+  if (!folder) return
+  const existing = state.jobs.find(
+    j =>
+      j.episode_id === episodeId &&
+      j.kind === 'render' &&
+      (j.status === 'pending' || j.status === 'running')
+  )
+  if (existing) return
+  const jobId = newJobId()
+  try {
+    const outcome: RenderStartOutcome = await renderStart(jobId, folder, episodeId)
+    if (outcome.fallback_from) {
+      maybeWarnEncoderFallback(outcome.fallback_from, outcome.chosen_encoder)
+    }
+  } catch (err) {
+    pushDangerToast(`Không khởi chạy được render: ${messageOf(err)}`)
+  }
+}
+
+/**
+ * Cancel the in-flight render job for `episodeId`. The backend
+ * kills the ffmpeg child and the cleanup pass removes the partial
+ * `<basename>.VietSub.mp4` from the EpisodeFolder.
+ */
+export async function cancelRender(episodeId: string): Promise<void> {
+  const job = state.jobs.find(
+    j =>
+      j.episode_id === episodeId &&
+      j.kind === 'render' &&
+      (j.status === 'pending' || j.status === 'running')
+  )
+  if (!job) return
+  try {
+    await jobCancel(job.id)
+  } catch (err) {
+    pushDangerToast(`Không hủy được job: ${messageOf(err)}`)
+  }
+}
+
+function maybeWarnEncoderFallback(from: EncoderKey, to: EncoderKey): void {
+  const key = `${from}->${to}`
+  if (encoderFallbackToastShown.has(key)) return
+  encoderFallbackToastShown.add(key)
+  const fromLabel = ENCODER_LABELS[from] ?? from
+  const toLabel = ENCODER_LABELS[to] ?? to
+  pushWarnToast(
+    `Encoder ${fromLabel} không khả dụng trên máy này, dùng ${toLabel}`
+  )
+}
+
 /**
  * Cancel by raw job id — used by the Jobs panel where the row
  * already knows its `JobView`. Same semantics as the per-Episode
@@ -382,8 +457,9 @@ export async function retryJob(job: JobView): Promise<void> {
     await startExtractSubtitle(job.episode_id)
   } else if (job.kind === 'extract_audio') {
     await startExtractAudio(job.episode_id)
+  } else if (job.kind === 'render') {
+    await startRender(job.episode_id)
   }
-  // Render retry surface lands alongside slice 0011.
 }
 
 /**

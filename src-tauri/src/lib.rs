@@ -1,6 +1,7 @@
 mod ass_ops;
 mod commands;
 mod duration_probe;
+mod encoder_probe;
 mod episode_state;
 mod install;
 mod job_queue;
@@ -69,6 +70,14 @@ pub fn run() {
             commands::job_remove_pending,
             commands::settings_get_queue_concurrency,
             commands::settings_set_queue_concurrency,
+            commands::encoder_probe_get_cached,
+            commands::encoder_probe_rescan,
+            commands::project_get_render_config,
+            commands::project_set_render_config,
+            commands::episode_get_effective_render_config,
+            commands::episode_set_render_config_override,
+            commands::render_start,
+            commands::render_cancel,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

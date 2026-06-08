@@ -22,6 +22,7 @@ import AudioOverwriteConfirmModal from '@views/project/AudioOverwriteConfirmModa
 import ExtractConfirmModal from '@views/project/ExtractConfirmModal'
 import ExtractErrorModal from '@views/project/ExtractErrorModal'
 import ProjectSettingsModal from '@views/project/ProjectSettingsModal'
+import RenderPanel from '@views/project/render/RenderPanel'
 import TranslatePanel from '@views/project/translate/TranslatePanel'
 import TrackPickerModal from '@views/track-picker/TrackPickerModal'
 import {
@@ -289,6 +290,8 @@ const EpisodeRow: Component<EpisodeRowProps> = props => {
     artifactStateFor(props.episode.id)?.hasExtractedSub ?? false
   const hasExtractedAudio = (): boolean =>
     artifactStateFor(props.episode.id)?.hasExtractedAudio ?? false
+  const hasTranslatedSub = (): boolean =>
+    artifactStateFor(props.episode.id)?.hasTranslatedSub ?? false
 
   const isSubQueued = (): boolean => subJob().phase === 'queued'
   const isSubRunning = (): boolean => subJob().phase === 'running'
@@ -379,6 +382,13 @@ const EpisodeRow: Component<EpisodeRowProps> = props => {
 
       <Show when={hasExtractedSub()}>
         <TranslatePanel
+          episodeId={props.episode.id}
+          episodeName={props.episode.folder_name}
+        />
+      </Show>
+
+      <Show when={hasTranslatedSub()}>
+        <RenderPanel
           episodeId={props.episode.id}
           episodeName={props.episode.folder_name}
         />

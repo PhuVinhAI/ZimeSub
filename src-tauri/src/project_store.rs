@@ -638,6 +638,80 @@ pub fn set_default_extract_audio(
     Ok(project)
 }
 
+/// Persist a new `default_render_config` block. Slice 0011 wires this
+/// to the Project Settings "Render" sub-form. Encoder is normalised:
+/// anything outside the known set (`auto` plus the four h264 keys) is
+/// coerced to `auto` so a typo in the request can't poison the manifest
+/// — the runtime EncoderProbe is still authoritative.
+pub fn set_default_render_config(
+    folder: &Path,
+    config: RenderConfig,
+) -> Result<ProjectJson, ProjectError> {
+    let mut project = open_project(folder)?;
+    project.default_render_config = normalise_render_config(config);
+    write_project_json_atomic(folder, &project)?;
+    Ok(project)
+}
+
+/// Persist `override_config` (or clear it when `None`) on `episode_id`.
+/// Slice 0011 wires this to the per-Episode "Cấu hình override" form.
+pub fn set_render_config_override(
+    folder: &Path,
+    episode_id: &str,
+    override_config: Option<RenderConfig>,
+) -> Result<ProjectJson, ProjectError> {
+    let mut project = open_project(folder)?;
+    {
+        let episode = project
+            .episodes
+            .iter_mut()
+            .find(|e| e.id == episode_id)
+            .ok_or(ProjectError::EpisodeNotFound)?;
+        episode.render_config_override = override_config.map(normalise_render_config);
+    }
+    write_project_json_atomic(folder, &project)?;
+    Ok(project)
+}
+
+/// Resolve the effective [`RenderConfig`] for `episode_id` — the
+/// override if set, otherwise the project default. Used by the render
+/// command handler to assemble the [`crate::job_queue::RenderSpec`].
+pub fn effective_render_config(
+    folder: &Path,
+    episode_id: &str,
+) -> Result<RenderConfig, ProjectError> {
+    let project = open_project(folder)?;
+    let episode = project
+        .episodes
+        .iter()
+        .find(|e| e.id == episode_id)
+        .ok_or(ProjectError::EpisodeNotFound)?;
+    Ok(episode
+        .render_config_override
+        .clone()
+        .unwrap_or_else(|| project.default_render_config.clone()))
+}
+
+/// Clamp/normalise a [`RenderConfig`] before persisting. Encoder is
+/// coerced to a known string; quality is clamped to `0..=100`;
+/// audio_codec is always `aac` in v1 per AC; bitrate is clamped to a
+/// sensible 32..=512 kbps range.
+fn normalise_render_config(config: RenderConfig) -> RenderConfig {
+    let encoder = match config.encoder.as_str() {
+        "auto" | "h264_qsv" | "h264_nvenc" | "h264_amf" | "libx264" => config.encoder.clone(),
+        _ => "auto".to_string(),
+    };
+    let quality = config.quality.min(100);
+    let audio_codec = "aac".to_string();
+    let audio_bitrate_kbps = config.audio_bitrate_kbps.clamp(32, 512);
+    RenderConfig {
+        encoder,
+        quality,
+        audio_codec,
+        audio_bitrate_kbps,
+    }
+}
+
 fn read_project_json(path: &Path) -> Result<ProjectJson, ProjectError> {
     let text = fs::read_to_string(path)?;
     let project: ProjectJson = serde_json::from_str(&text)?;

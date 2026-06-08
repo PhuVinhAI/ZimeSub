@@ -18,13 +18,17 @@ use tauri::{AppHandle, State};
 use tracing::error;
 
 use crate::ass_ops::{self, AssOpsError};
+use crate::encoder_probe::{self, Encoder, ResolvedEncoder};
 use crate::episode_state::{self, EpisodeArtifacts};
 use crate::install::{self, InstallRegistry};
-use crate::job_queue::{ExtractAudioSpec, ExtractSubtitleSpec, JobQueue, JobSpec, JobsSnapshot};
+use crate::job_queue::{
+    ExtractAudioSpec, ExtractSubtitleSpec, JobQueue, JobSpec, JobsSnapshot, RenderSpec,
+};
 use crate::mkv_probe::{self, SubtitleTrack};
 use crate::process_runner::{self, RunSpec};
 use crate::project_store::{
-    self, AddEpisodesOutcome, ExtractAudioConfig, FolderInspection, ProjectJson, RecentProjectStatus,
+    self, AddEpisodesOutcome, ExtractAudioConfig, FolderInspection, ProjectJson,
+    RecentProjectStatus, RenderConfig,
 };
 use crate::settings_store::{self, Settings};
 use crate::tooling::{self, RequiredTool, ToolReport};
@@ -902,4 +906,249 @@ pub fn episode_style_patch(
     }
     ass_ops::validate_styles_block(&styles_block).map_err(|e| e.to_string())?;
     ass_ops::replace_styles_section(&target, &styles_block).map_err(|e| e.to_string())
+}
+
+/// EncoderProbe result surfaced to the frontend. Slice 0011.
+///
+/// `available_encoders` is the canonical key list (`h264_qsv`,
+/// `h264_nvenc`, `h264_amf`, `libx264`) priority-ordered so the UI's
+/// dropdown can render them in the same order it would resolve them.
+#[derive(Debug, Serialize)]
+pub struct EncoderProbeOutcome {
+    pub available_encoders: Vec<String>,
+}
+
+/// Read the cached `available_encoders` from settings. Drives the
+/// Project Settings render sub-form on open + the per-Episode "Cấu
+/// hình override" form. Returns an empty list when the EncoderProbe
+/// has never been run; the UI surfaces a "Quét encoder" CTA in that
+/// case.
+#[tauri::command]
+pub fn encoder_probe_get_cached(
+    state: State<'_, AppState>,
+) -> Result<EncoderProbeOutcome, String> {
+    let settings = state
+        .settings
+        .lock()
+        .map_err(|e| format!("settings mutex poisoned: {e}"))?;
+    Ok(EncoderProbeOutcome {
+        available_encoders: settings.available_encoders.clone(),
+    })
+}
+
+/// Run `ffmpeg -hide_banner -encoders`, parse + intersect with the
+/// priority list, persist into `settings.available_encoders`, and
+/// return the result. Drives:
+///  * The "Quét lại encoder" button in Settings.
+///  * The implicit first-launch probe (called once on AppShell mount
+///    after the Onboarding gate clears).
+///
+/// Spawn failure / non-zero exit collapses to an empty list — the
+/// frontend surfaces a danger toast in that case.
+#[tauri::command]
+pub fn encoder_probe_rescan(
+    state: State<'_, AppState>,
+) -> Result<EncoderProbeOutcome, String> {
+    let ffmpeg_path = {
+        let settings = state
+            .settings
+            .lock()
+            .map_err(|e| format!("settings mutex poisoned: {e}"))?;
+        settings
+            .tool_paths
+            .get("ffmpeg")
+            .cloned()
+            .ok_or_else(|| "Chưa phát hiện đường dẫn ffmpeg".to_string())?
+    };
+
+    let encoders = encoder_probe::probe_via_ffmpeg(Path::new(&ffmpeg_path));
+    let keys: Vec<String> = encoders.iter().map(|e| e.key().to_string()).collect();
+
+    {
+        let mut settings = state
+            .settings
+            .lock()
+            .map_err(|e| format!("settings mutex poisoned: {e}"))?;
+        settings.available_encoders = keys.clone();
+        if let Err(err) = settings_store::save(&settings) {
+            error!(error = %err, "failed to persist settings.json after encoder probe");
+        }
+    }
+
+    Ok(EncoderProbeOutcome {
+        available_encoders: keys,
+    })
+}
+
+/// Read the project's `default_render_config`. Drives the Settings
+/// panel render sub-form on open.
+#[tauri::command]
+pub fn project_get_render_config(folder: String) -> Result<RenderConfig, String> {
+    let project = project_store::open_project(Path::new(&folder)).map_err(|e| e.to_string())?;
+    Ok(project.default_render_config)
+}
+
+/// Persist a new `default_render_config` block. Returns the post-
+/// write [`ProjectJson`] so the projects store can swap `active`
+/// without a second `project_open` round-trip.
+#[tauri::command]
+pub fn project_set_render_config(
+    folder: String,
+    config: RenderConfig,
+) -> Result<ProjectJson, String> {
+    project_store::set_default_render_config(Path::new(&folder), config)
+        .map_err(|e| e.to_string())
+}
+
+/// Read the effective render config for one Episode (override if
+/// present, project default otherwise). Drives the per-Episode "Cấu
+/// hình override" form so the inputs boot with the actual settings
+/// the next render would use.
+#[tauri::command]
+pub fn episode_get_effective_render_config(
+    folder: String,
+    episode_id: String,
+) -> Result<RenderConfig, String> {
+    project_store::effective_render_config(Path::new(&folder), &episode_id)
+        .map_err(|e| e.to_string())
+}
+
+/// Persist a per-Episode `render_config_override`. Passing `null`
+/// clears the override (restoring the project default). Returns the
+/// post-write [`ProjectJson`] so the projects store can swap `active`.
+#[tauri::command]
+pub fn episode_set_render_config_override(
+    folder: String,
+    episode_id: String,
+    config: Option<RenderConfig>,
+) -> Result<ProjectJson, String> {
+    project_store::set_render_config_override(Path::new(&folder), &episode_id, config)
+        .map_err(|e| e.to_string())
+}
+
+/// Outcome of [`render_start`]. Mirrors the encoder-resolution result
+/// so the frontend can surface a one-time fallback toast.
+///
+/// `chosen_encoder` is the canonical key the runner is about to spawn
+/// ffmpeg with. `fallback_from` is `Some(<original>)` when the
+/// configured encoder was not available on this machine and the
+/// resolver dropped to the highest-available encoder; the frontend
+/// uses this to render the AC's "Encoder X không khả dụng trên máy
+/// này, dùng Y" warn toast.
+#[derive(Debug, Serialize)]
+pub struct RenderStartOutcome {
+    pub chosen_encoder: String,
+    pub fallback_from: Option<String>,
+}
+
+/// Enqueue a fresh `Render` job for `episode_id`. Slice 0011.
+///
+/// Pre-conditions enforced here (any failure surfaces a danger toast
+/// on the frontend rather than a queued job that nobody finishes):
+///  * The project at `folder` loads and contains `episode_id`.
+///  * The Episode has a TranslatedSub on disk
+///    (`<basename>.vietsub.ass`) — without it the AC says the Render
+///    button is disabled, but we guard server-side too.
+///  * The cached `ffmpeg` path resolves and at least one encoder is
+///    in `available_encoders` (otherwise no Render Job can run).
+///
+/// Encoder resolution:
+///  * The effective `RenderConfig` (override if set, else default) is
+///    resolved against `available_encoders` via
+///    [`encoder_probe::resolve_encoder`]. `auto` → first available.
+///    A configured encoder that isn't available on this machine
+///    fallback to the highest-available; the saved config is NOT
+///    overwritten — only the runtime spec uses the fallback.
+#[tauri::command]
+pub async fn render_start(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    job_id: String,
+    folder: String,
+    episode_id: String,
+) -> Result<RenderStartOutcome, String> {
+    let project_folder = Path::new(&folder);
+    let project = project_store::open_project(project_folder).map_err(|e| e.to_string())?;
+    let episode = project
+        .episodes
+        .iter()
+        .find(|e| e.id == episode_id)
+        .ok_or_else(|| "Không tìm thấy Episode trong project".to_string())?;
+
+    let episode_folder = project_folder.join(&episode.folder_name);
+    let translated_sub = episode_folder.join(format!("{}.vietsub.ass", episode.folder_name));
+    if !translated_sub.is_file() {
+        return Err("Cần TranslatedSub trước".to_string());
+    }
+
+    let render_config = episode
+        .render_config_override
+        .clone()
+        .unwrap_or_else(|| project.default_render_config.clone());
+
+    let (ffmpeg_path, mkvmerge_path, available_encoders) = {
+        let settings = state
+            .settings
+            .lock()
+            .map_err(|e| format!("settings mutex poisoned: {e}"))?;
+        let ffmpeg = settings
+            .tool_paths
+            .get("ffmpeg")
+            .cloned()
+            .ok_or_else(|| "Chưa phát hiện đường dẫn ffmpeg".to_string())?;
+        let mkvmerge = settings.tool_paths.get("mkvmerge").cloned();
+        let parsed: Vec<Encoder> = settings
+            .available_encoders
+            .iter()
+            .filter_map(|k| Encoder::from_key(k))
+            .collect();
+        (ffmpeg, mkvmerge, parsed)
+    };
+
+    let ResolvedEncoder {
+        chosen,
+        fallback_from,
+    } = encoder_probe::resolve_encoder(&render_config.encoder, &available_encoders)
+        .ok_or_else(|| {
+            "Chưa có encoder khả dụng. Hãy chạy lại bước dò encoder trong Cài đặt.".to_string()
+        })?;
+
+    let video_quality_args = encoder_probe::quality_args(chosen, render_config.quality);
+
+    let spec = RenderSpec {
+        job_id,
+        episode_id: episode_id.clone(),
+        episode_name: episode.folder_name.clone(),
+        project_folder: project_folder.to_path_buf(),
+        ffmpeg_path: PathBuf::from(ffmpeg_path),
+        mkvmerge_path: mkvmerge_path.map(PathBuf::from),
+        source_mkv_path: PathBuf::from(&episode.source_mkv_path),
+        episode_folder,
+        output_basename: episode.folder_name.clone(),
+        encoder: chosen.key().to_string(),
+        video_quality_args,
+        audio_bitrate_kbps: render_config.audio_bitrate_kbps,
+    };
+
+    let jobs = state.jobs(&app);
+    jobs.enqueue(JobSpec::Render(spec)).await;
+
+    Ok(RenderStartOutcome {
+        chosen_encoder: chosen.key().to_string(),
+        fallback_from: fallback_from.map(|e| e.key().to_string()),
+    })
+}
+
+/// Cancel a queued or running render job by id. Mirrors the extract
+/// variants — idempotent on unknown / terminal ids, partial output
+/// cleanup happens inside the runner.
+#[tauri::command]
+pub async fn render_cancel(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    job_id: String,
+) -> Result<(), String> {
+    let jobs = state.jobs(&app);
+    let _ = jobs.cancel(&job_id).await;
+    Ok(())
 }

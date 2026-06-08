@@ -8,8 +8,10 @@
 //! drives the Sidebar recents and the post-Onboarding auto-open behaviour.
 //! Slice 0008 adds `queue_concurrency_extract` — the user-configurable
 //! tier budget for the tiered `JobQueue` (max 1 Render + max N Extract).
-//! `available_encoders` and the `ui` block land in their respective
-//! later slices.
+//! Slice 0011 adds `available_encoders` — the cached intersection of
+//! `ffmpeg -encoders` and the priority list (QSV > NVENC > AMF > libx264)
+//! that drives the Render-config encoder dropdown + the resolution
+//! fallback toast. The `ui` block lands in a later slice.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -57,6 +59,14 @@ pub struct Settings {
     /// always 1 per ADR-0003 and is not exposed.
     #[serde(default = "default_queue_concurrency_extract")]
     pub queue_concurrency_extract: u8,
+    /// Cached intersection of `ffmpeg -encoders` and the
+    /// `[QSV, NVENC, AMF, libx264]` priority list (slice 0011). The
+    /// strings are the canonical ffmpeg encoder names (`h264_qsv`,
+    /// `h264_nvenc`, `h264_amf`, `libx264`). Empty until the first
+    /// EncoderProbe run; the runner refuses to spawn a Render Job
+    /// when this list is empty until the user re-probes.
+    #[serde(default)]
+    pub available_encoders: Vec<String>,
 }
 
 impl Default for Settings {
@@ -67,6 +77,7 @@ impl Default for Settings {
             tool_versions: BTreeMap::new(),
             recent_projects: Vec::new(),
             queue_concurrency_extract: DEFAULT_QUEUE_CONCURRENCY_EXTRACT,
+            available_encoders: Vec::new(),
         }
     }
 }
